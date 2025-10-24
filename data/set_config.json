@@ -1,0 +1,197 @@
+{
+    "ONE": {
+        "stlands": "ONE",
+        "expansions": ["ONE"],
+        "thelist": [
+            "Jin-Gitaxias, Progress Tyrant",
+            "Vorinclex, Monstrous Raider",
+            "Urabrask, Heretic Praetor",
+            "Sheoldred, the Apocalypse"
+        ],
+        "pack_size": 14
+    },
+    "MOM": {
+        "stlands": "MOM",
+        "expansions": ["MOM", "MUL"],
+        "pack_size": 15
+    },
+    "WOE": {
+        "stlands": "WOE",
+        "expansions": ["WOE", "WOT"],
+        "pack_size": 14
+    },
+    "LCI": {
+        "stlands": "LCI",
+        "expansions": ["LCI"],
+        "special_guests": [
+            "Lord of Atlantis",
+            "Malcolm, Keen-Eyed Navigator",
+            "Bridge From Below",
+            "Mephidross Vampire",
+            "Pitiless Plunderer",
+            "Breeches, Brazen Plunderer",
+            "Dargo, the Shipwrecker",
+            "Rampaging Ferocidon",
+            "Underworld Breach",
+            "Carnage Tyrant",
+            "Polyraptor",
+            "Ghalta, Primal Hunger",
+            "Kalamax, the Stormsire",
+            "Lord Windgrace",
+            "Mirri, Weatherlight Duelist",
+            "Thrasios, Triton Hero",
+            "Mana Crypt",
+            "Star Compass"
+        ],
+        "pack_size": 15
+    },
+    "MKM": {
+        "stlands": "MKM",
+        "expansions": ["MKM"],
+        "exclude": [
+            "Tomik, Wielder of Law",
+            "Melek, Reforged Researcher",
+            "Voja, Jaws of the Conclave"
+        ],
+        "special_guests": [
+            "Crashing Footfalls",
+            "Drown in the Loch",
+            "Fabricate",
+            "Field of the Dead",
+            "Gamble",
+            "Ghostly Prison",
+            "Show and Tell",
+            "Tireless Tracker",
+            "Tragic Slip",
+            "Victimize"
+        ],
+        "thelist": [
+            "Smuggler's Copter",
+            "Bishop of the Bloodstained",
+            "Burden of Guilt",
+            "Evolutionary Leap",
+            "Combine Chrysalis",
+            "Consign // Oblivion",
+            "Possibility Storm",
+            "Duskmantle, House of Shadow",
+            "Enlisted Wurm",
+            "Ghost Quarter",
+            "Gnaw to the Bone",
+            "Goblin Warchief",
+            "Hard Evidence",
+            "High Alert",
+            "Ixidor, Reality Sculptor",
+            "Jace, Wielder of Mysteries",
+            "Krosan Tusker",
+            "Kuldotha Rebirth",
+            "Laid to Rest",
+            "Leonin Relic-Warder",
+            "Magmaw",
+            "Mass Hysteria",
+            "Maverick Thopterist",
+            "Mentor of the Meek",
+            "Metalspinner's Puzzleknot",
+            "Millstone",
+            "Mistveil Plains",
+            "Molten Psyche",
+            "Monologue Tax",
+            "Mystery Key",
+            "Nyx Weaver",
+            "Putrid Warrior",
+            "Quintorius, Field Historian",
+            "Ranger-Captain of Eos",
+            "Shard of Broken Glass",
+            "Spell Snare",
+            "Stromkirk Captain",
+            "Syr Konrad, the Grim",
+            "Treacherous Terrain",
+            "Worldspine Wurm"
+        ],
+        "pack_size": 13
+    },
+    "OTJ": {
+        "stlands": "OTJ",
+        "expansions": ["OTJ", "OTP", "BIG"],
+        "special_guests": [
+            "Stoneforge Mystic",
+            "Brazen Borrower",
+            "Desertion",
+            "Morbid Opportunist",
+            "Port Razer",
+            "Scapeshift",
+            "Mystic Snake",
+            "Notion Thief",
+            "Desert",
+            "Prismatic Vista"
+        ],
+        "pack_size": 14
+    },
+    "BLB": {
+        "stlands": "BLB",
+        "expansions": ["BLB"],
+        "special_guests": [
+            "Swords to Plowshares",
+            "Ledger Shredder",
+            "Rat Colony",
+            "Relentless Rats",
+            "Kindred Charge",
+            "Sylvan Tutor",
+            "Toski, Bearer of Secrets",
+            "Frogmite",
+            "Sword of Fire and Ice",
+            "Secluded Courtyard"
+        ],
+        "pack_size": 13
+    },
+    "DSK": {
+        "stlands": "DSK",
+        "expansions": ["DSK"],
+        "special_guests": [
+            "Hallowed Haunting",
+            "Soul Warden",
+            "Expropriate",
+            "Phantasmal Image",
+            "Damnation",
+            "Sacrifice",
+            "Maddening Hex",
+            "Unholy Heat",
+            "Collected Company",
+            "Noxious Revival"
+        ],
+        "pack_size": 14
+    },
+    "FDN": {
+        "stlands": "FDN",
+        "expansions": ["FDN"],
+        "special_guests": [
+            "Condemn",
+            "Sphinx's Tutelage",
+            "Grim Tutor",
+            "Embercleave",
+            "Goblin Bushwhacker",
+            "Bloom Tender",
+            "Paradise Druid",
+            "Akroma's Memorial",
+            "Temporal Manipulation",
+            "Fiend Artisan"
+        ],
+        "pack_size": 14
+    },
+    "DFT": {
+        "stlands": "DFT",
+        "expansions": ["DFT"],
+        "special_guests": [
+            "Cavalier of Dawn",
+            "Thoughtcast",
+            "Whir of Invention",
+            "Bone Miser",
+            "Lord of the Undead",
+            "Chandra's Ignition",
+            "Galvanic Blast",
+            "Pathbreaker Ibex",
+            "Chrome Mox",
+            "Skysovereign, Consul Flagship"
+        ],
+        "pack_size": 14
+    }
+}

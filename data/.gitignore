@@ -1,0 +1,4 @@
+*.parquet
+*.csv.gz
+cards_mtga.csv
+cards_scryfall.json

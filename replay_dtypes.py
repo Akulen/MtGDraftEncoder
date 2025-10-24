@@ -55,12 +55,12 @@ COLUMN_TYPES = (
     (re.compile(r"^opp_colors$"), "str"),
     (re.compile(r"^num_turns$"), "int8"),
     (re.compile(r"^won$"), "bool"),
-    (re.compile(r"^deck_.*"), "int8"),
-    (re.compile(r"^sideboard_.*"), "int8"),
+    (re.compile(r"^deck_.*"), "float16"),
+    (re.compile(r"^sideboard_.*"), "float16"),
     # Game
-    (re.compile(r"^drawn_.*"), "int8"),
-    (re.compile(r"^tutored_.*"), "int8"),
-    (re.compile(r"^opening_hand_.*"), "int8"),
+    (re.compile(r"^drawn_.*"), "float16"),
+    (re.compile(r"^tutored_.*"), "float16"),
+    (re.compile(r"^opening_hand_.*"), "float16"),
     # Replay
     (re.compile(r"^candidate_hand_\d$"), "str"),
     (re.compile(r"^opening_hand$"), "str"),
