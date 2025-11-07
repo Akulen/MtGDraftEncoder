@@ -1,7 +1,14 @@
 from collections import Counter
+import json
 import re
+import numpy as np
 import polars as pl
 import torch
+from huggingface_hub import login
+from sentence_transformers import SentenceTransformer
+
+with open('tokens.json', 'r') as f:
+    auth_tokens = json.load(f)
 
 class simplestr(type):
     def __str__(self):
@@ -56,3 +63,16 @@ class SimpleTokenizer(metaclass=simplestr):
             dtype=torch.int16
         ).transpose(-1, -2) \
          .to(self.device)
+
+class Gemma:
+    def __init__(self, d_encoder=768, device=None):
+        login(token=auth_tokens['huggingface'])
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        model_id = 'google/embeddinggemma-300M'
+        self.model = SentenceTransformer(
+            model_id, truncate_dim=d_encoder, device=device
+        ).to(device=device)
+
+    def __call__(self, x: str) -> np.ndarray:
+        return self.model.encode(x)
