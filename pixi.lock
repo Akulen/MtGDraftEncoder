@@ -259,6 +259,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/notebook-7.4.7-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/notebook-shim-0.2.4-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/numpy-2.3.3-py312h33ff503_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/nvidia-ml-py-13.580.82-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/openjpeg-2.5.4-h55fea9a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/openldap-2.6.10-he970967_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/openssl-3.5.3-h26f9b46_1.conda
@@ -4053,6 +4054,20 @@ packages:
   - pkg:pypi/numpy?source=compressed-mapping
   size: 8786490
   timestamp: 1757505242032
+- conda: https://conda.anaconda.org/conda-forge/noarch/nvidia-ml-py-13.580.82-pyhd8ed1ab_0.conda
+  sha256: c51088a5f854a4c7d466f959d7b0b21c18761eef4e07cf299ff9a5a8173208b7
+  md5: 3767062cd4dbecdce5ac1b1b151f5685
+  depends:
+  - python >=3.10
+  constrains:
+  - pynvml ~=13.0
+  - nvidia-ml ==9999999999
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/nvidia-ml-py?source=hash-mapping
+  size: 47760
+  timestamp: 1757635351592
 - conda: https://conda.anaconda.org/conda-forge/linux-64/openjpeg-2.5.4-h55fea9a_0.conda
   sha256: 3900f9f2dbbf4129cf3ad6acf4e4b6f7101390b53843591c53b00f034343bc4d
   md5: 11b3379b191f63139e29c0d19dee24cd
