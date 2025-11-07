@@ -381,7 +381,7 @@ def get_draft_data(df_cards, ext, pack_size=None, pad_id=0) -> pl.LazyFrame:
             pl.lit(pad_id).repeat_by(
                 15 - pl.sum_horizontal(pl.col('^pack_card_.*$'))
             )
-        ])
+        ]).list.to_array(15)
     ).drop([
         'event_type',
     ] + [
