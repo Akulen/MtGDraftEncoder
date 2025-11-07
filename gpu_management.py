@@ -1,3 +1,4 @@
+import os
 import pynvml
 import time
 
@@ -50,6 +51,11 @@ def get_gpus(max_gpus=2, max_tasks=0, forcing=False, verbose=False):
             pynvml.nvmlShutdown()
         except pynvml.NVMLError:
             pass
+
+def set_gpus(max_gpus=2, max_tasks=0, forcing=False, verbose=False):
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(get_gpus(
+        max_gpus, max_tasks, forcing, verbose
+    ))
 
 
 def main():
