@@ -1,7 +1,7 @@
 import jax
 import equinox as eqx
 import optax
-from typing import assert_never, cast, Callable, Literal, Optional, Tuple
+from typing import assert_never, cast, Any, Callable, Literal, Optional, Tuple
 from jaxtyping import Array, Float, PRNGKeyArray, Real
 
 from data_types import Cards, Drafts
@@ -79,11 +79,11 @@ class Trainer:
         self,
         model: eqx.Module,
         state: eqx.nn.State,
-        opt_state: optax.OptState,
+        opt_state: Any,
         cards: Cards,
         drafts: Drafts,
         key: PRNGKeyArray
-    ) -> Tuple[eqx.Module, eqx.nn.State, optax.OptState, Float[Array, ""]]:
+    ) -> Tuple[eqx.Module, eqx.nn.State, Any, Float[Array, ""]]:
         model, state, opt_state, cards = self.shard_model(
             model, state, opt_state, cards
         )
@@ -106,11 +106,11 @@ class Trainer:
         self,
         model: eqx.Module,
         state: eqx.nn.State,
-        opt_state: optax.OptState,
+        opt_state: Any,
         cards: Cards,
         drafts: Drafts,
         key: PRNGKeyArray
-    ) -> Tuple[eqx.Module, eqx.nn.State, optax.OptState, Float[Array, ""]]:
+    ) -> Tuple[eqx.Module, eqx.nn.State, Any, Float[Array, ""]]:
         model, state, opt_state, cards = self.shard_model(
             model, state, opt_state, cards
         )
