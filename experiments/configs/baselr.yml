@@ -1,0 +1,8 @@
+name: BaseLinearRegression
+train_set:
+  - ONE
+  - DFT
+temporal_split: true
+model: LinearRegression
+epochs: 100
+batch_size: 256

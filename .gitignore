@@ -2,3 +2,5 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+cache
+ckpt
