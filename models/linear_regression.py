@@ -9,7 +9,7 @@ from data_types import Cards, Drafts
 class LinearRegression(eqx.Module):
     linear: eqx.nn.Linear
 
-    def __init__(self, d_t: int, d_n: int, key: PRNGKeyArray):
+    def __init__(self, key: PRNGKeyArray, d_t: int, d_n: int):
         key, subkey = jax.random.split(key)
         self.linear = eqx.nn.Linear(
             in_features=45*(d_t+d_n),
@@ -18,7 +18,7 @@ class LinearRegression(eqx.Module):
         )
 
     def __call__(self,
-        cards: Cards, drafts: Drafts, state: eqx.nn.State, key: PRNGKeyArray
+        key: PRNGKeyArray, cards: Cards, drafts: Drafts, state: eqx.nn.State
     ) -> Tuple[Float[Array, ""], eqx.nn.State]:
         del key
         assert jnp.issubdtype(cards.textual_features.dtype, jnp.floating)

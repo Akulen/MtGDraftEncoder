@@ -69,8 +69,8 @@ class Trainer:
         keys = jax.random.split(key, batch_size)
         outputs, state = jax.vmap(
             cast(Callable, model),
-            in_axes=(None, 0, None, 0)
-        )(cards, drafts, state, keys)
+            in_axes=(0, None, 0, None)
+        )(keys, cards, drafts, state)
         loss = self.loss(outputs, drafts)
         return loss, state
 
