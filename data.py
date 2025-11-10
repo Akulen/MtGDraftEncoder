@@ -1,25 +1,37 @@
-from functools import cache, partial
+import os
+from gpu_management import set_gpus
+
+if __name__ == "__main__":
+    set_gpus(2, forcing=True)
+    print(f"XLA_PYTHON_CLIENT_ALLOCATOR set to: {os.environ.get('XLA_PYTHON_CLIENT_ALLOCATOR')}")
+    print(f"CUDA_VISIBLE_DEVICES set to: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+
+from functools import cache
+import datetime
+import humanfriendly
 import json
 import numpy as np
-import os
+import pickle
 import polars as pl
-import torch
 from torch.utils.data import Dataset
-from typing import (
-    cast, Any, Callable, Generator, Generic, List, Optional, Tuple, TypeVar
-)
+from typing import Any, Callable, List, Tuple
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int
-from typing import Mapping, NamedTuple
+from beartype import beartype as typechecker
+from jaxtyping import jaxtyped, Array, Float, Int, PRNGKeyArray
+from typing import Mapping
+import optax
+import equinox as eqx
 
 import time
 
+from data_types import Cards, Drafts
 from card_utils import (
     get_all_cards, make_oracle, get_draft_data, get_card_stats
 )
 
 os.makedirs('data', exist_ok=True)
+CSI = "\x1b[" #]
 
 @cache
 def get_set_config() -> Mapping[str, Mapping[str, Any]]:
@@ -29,6 +41,7 @@ def get_set_config() -> Mapping[str, Mapping[str, Any]]:
 class DL17Lands(Dataset):
     def __init__(self, format='OTJ', include_ext=False, verbose=True):
         st = time.time()
+        self.format = format
         self.all_cards = get_all_cards()
         if verbose:
             print(f"Loading {format}")
@@ -45,6 +58,7 @@ class DL17Lands(Dataset):
         self.cards, self.drafts = self.collect_format(
             **set_config, include_ext=include_ext
         )
+        self.pack_size = set_config.get('pack_size', 15)
         if verbose:
             print(f"Making extension dataframe: {time.time() - st:.6f}s")
             print('#' * 50)
@@ -102,617 +116,250 @@ class DL17Lands(Dataset):
 
         return df_cards, df_drafts
 
-T = TypeVar('T', torch.Tensor, jnp.ndarray)
 
-@jax.pmap
-def device_select(x: T, i) -> T:
-    return x[i]
-
-class CardDataset(Dataset, Generic[T]):
-    def __init__(
-        self,
-        oracle: List[str],
-        target: torch.Tensor,
-        weight: torch.Tensor,
-        tokenizer: Callable[[str], torch.Tensor],
-        use_torch: bool=False
-    ):
-        # tokenizer should return a tensor of shape (?, seq_len)
-        # Currently Bert return tokens, pad_mask
-        # But simpletokenizer returns tokens without padding
-        # TODO:check if jnp works
-        encodings = torch.stack(
-            list(map(tokenizer, oracle))
+ONE_WEEK = datetime.timedelta(days=7)
+def collate_drafts(
+    set_id: int,
+    dl: DL17Lands,
+    s2l_week: bool=False,
+    first_n: int=-1,
+    pad_id: int=0,
+    verbose: bool= False,
+) -> Drafts:
+    cache = f'drafts_{dl.format}'
+    if s2l_week:
+        cache += '_s2l'
+    if first_n > 0:
+        cache += f'_first-{first_n}'
+    if pad_id != 0:
+        cache += f'_pad-{pad_id}'
+    if os.path.exists(f'cache/{cache}.pickle'):
+        return pickle.load(open(f'cache/{cache}.pickle', 'rb'))
+    assert(len(dl.all_cards.filter(pl.col('id') == pad_id)) == 0)
+    draft_start = (dl.drafts
+        .select(pl.col('draft_time'))
+        .min()
+        .collect()['draft_time']
+        .str.to_datetime()[0]
+    )
+    last_draft = (dl.drafts
+        .select(pl.col('draft_time'))
+        .max()
+        .collect()['draft_time']
+        .str.to_datetime()[0]
+    )
+    first_draft = last_draft - ONE_WEEK
+    if verbose:
+        print(
+            f"All drafts:         {CSI}31m{draft_start}{CSI}0m"
+            f" to {CSI}32m{last_draft}{CSI}0m"
         )
-        def convert(x: torch.Tensor) -> T:
-            if use_torch:
-                return x # type: ignore
-            return jnp.array(x) # type: ignore
-        self.encodings: T = convert(encodings)
-        self.target: T = convert(target)
-        self.weight: T = convert(weight)
-        self.n_devices: Optional[int] = None
-        self.n_samples = encodings.shape[0]
-        assert(self.n_samples == self.target.shape[0])
-        assert(self.n_samples == self.weight.shape[0])
-
-    def __len__(self):
-        return len(self.encodings)
-
-    def __getitem__(self, idx):
-        return (
-            self.encodings[idx],
-            self.target[idx],
-            self.weight[idx],
+    if s2l_week:
+        first_draft, last_draft = first_draft - ONE_WEEK, first_draft
+    if verbose:
+        print(
+            f"Picking drafts from {CSI}34m{first_draft}{CSI}0m"
+            f" to {CSI}32m{last_draft}{CSI}0m"
         )
+    n_picks = dl.pack_size * 3
+    drafts = (dl.drafts
+        .filter(pl.col('draft_time').str.to_datetime().is_between(
+            first_draft, last_draft
+        ))
+        .sort(['pack_number', 'pick_number'])
+        .group_by('draft_id').agg(
+            pl.col('pick_id'),
+            pl.col('pack')
+              .alias('packs_ids'),
+            (pl.col('event_match_wins').max() / (
+                  pl.col('event_match_wins').max()
+                + pl.col('event_match_losses').max()
+            )).alias('win_rate'),
+            pl.col('user_game_win_rate_bucket').mean()
+              .alias('player_win_rate'),
+            pl.col('user_n_games_bucket').max()
+              .alias('weight'),
+        )
+        .filter(pl.col('win_rate').is_not_nan())
+        .with_columns(
+            pl.col('pick_id').list.to_array(n_picks),
+            pl.col('packs_ids').list.to_array(n_picks),
+        )
+    )
+    if first_n > 0:
+        drafts = drafts.head(n=first_n)
+    drafts = drafts.collect()
+    if verbose:
+        select_drafts = len(drafts)
+        all_drafts = dl.drafts.select(pl.len()).collect().item() // n_picks
+        print(
+            f'{CSI}34m{select_drafts} drafts{CSI}0m out of '
+            f'{CSI}31m{all_drafts}{CSI}0m '
+            f'({100 * select_drafts // all_drafts}%)'
+        )
+    drafts = Drafts(
+        set_id=jnp.full((len(drafts),), set_id, dtype=jnp.int16),
+        packs=jnp.array(np.pad(
+            drafts['packs_ids'].to_numpy(),
+            ((0, 0), (0, 45 - n_picks), (0, 0)),
+            constant_values=pad_id
+        )),
+        picks=jnp.array(np.pad(
+            drafts['pick_id'].to_numpy(),
+            ((0, 0), (0, 45 - n_picks)),
+            constant_values=pad_id
+        )),
+        win_rate=jnp.array(drafts['win_rate'].to_numpy()),
+        player_wr=jnp.array(drafts['player_win_rate'].to_numpy()),
+        weight=jnp.array(drafts['weight'].to_numpy()),
+    )
+    pickle.dump(drafts, open(f'cache/{cache}.pickle', 'wb'))
+    return drafts
 
-    def to_devices(self, devices: List):
-        assert(isinstance(self.encodings, jnp.ndarray))
-        self.encodings = jax.device_put_replicated(self.encodings, devices)
-        self.target = jax.device_put_replicated(self.target, devices)
-        self.weight = jax.device_put_replicated(self.weight, devices)
-        self.n_devices = len(devices)
+def collate_cards(dt: DL17Lands, nlp_processor) -> Cards:
+    return Cards(
+        card_id=jnp.array(dt.cards['id'].to_numpy()),
+        textual_features=jnp.array(nlp_processor(dt.cards['oracle'])),
+        numeric_features=jnp.transpose(jnp.array([
+            dt.cards[category]
+            for category in [
+                'opening_hand', 'drawn', 'tutored', 'deck', 'sideboard', 'GIH'
+            ]
+        ])),
+    )
 
-    def batch(
-        self,
-        batch_size: int,
-        shuffle: bool=True,
-        seed: int=0
-    ) -> Tuple[Callable[[], Generator[Tuple[T, T, T], None, None]], int]:
-        assert(self.n_devices is None or batch_size % self.n_devices == 0)
-        def generator() -> Generator[Tuple[T, T, T], None, None]:
-            indices = np.arange(self.n_samples)
-            if shuffle:
-                rng = np.random.default_rng(seed)
-                rng.shuffle(indices)
-            if self.n_samples % batch_size != 0:
-                # Add first few samples to the last batch so each batch has the
-                # same size
-                # TODO: It might be better to only add to be a multiple of
-                # n_devices
-                indices = np.concatenate([
-                    indices,
-                    indices[:batch_size-len(indices) % batch_size]
-                ])
-
-            # Create batches
-            for start_idx in range(0, len(indices), batch_size):
-                batch_indices = indices[start_idx:start_idx + batch_size]
-                x: T
-                y: T
-                z: T
-                if self.n_devices is not None:
-                    batch_indices = batch_indices.reshape((self.n_devices, -1))
-                    x, y, z = map(partial(device_select, i=batch_indices),
-                        (self.encodings, self.target, self.weight)
-                    )
-                else:
-                    x = self.encodings[batch_indices]
-                    y = self.target[batch_indices]
-                    z = self.weight[batch_indices]
-                yield (x, y, z)
-
-        return generator, (self.n_samples + batch_size - 1) // batch_size
-
-class TextGraph(NamedTuple):
-    n_nodes: Int[Array, "batch_size"]
-    # n_edges: Int[Array, "batch_size"]
-    node_features: Int[Array, "n_nodes"]
-    edge_features: Int[Array, "n_edges 59"]
-    edges_u: Int[Array, "n_edges"]
-    edges_v: Int[Array, "n_edges"]
-
-class Graph(NamedTuple):
-    n_nodes: Int[Array, "batch_size"]
-    # n_edges: Int[Array, "batch_size"]
-    node_features: Float[Array, "n_nodes d_model"]
-    edge_features: Float[Array, "n_edges d_model"]
-    edges_u: Int[Array, "n_edges"]
-    edges_v: Int[Array, "n_edges"]
+def make_reverse_dict(l: Int[Array, "n"], offset=0) -> Int[Array, "m"]:
+    assert(l.min() > 0)
+    d = np.full(l.max() + 1, -1, dtype=jnp.int32)
+    d[0] = 0
+    d[l] = offset + np.arange(l.shape[0])
+    return jnp.array(d)
 
 class JaxDraftDataset:
     def __init__(
         self,
-        drafts: Mapping[str, Array],
-        targets: Array,
-        set_size: Int[Array, "1+n_sets"],
-        pack_size: int=15,
-        n_devices: int=1,
-        device_batch_size: Optional[int]=None,
-        batch_size: Optional[int]=None,
+        dataloaders: List[DL17Lands],
+        nlp_processor: Callable[[str], np.ndarray],
+        s2l_week: bool=False,
+        pad_id: int=0,
+        batch_size: int=32,
         shuffle: bool=True,
-        seed: int=42
+        seed: int=42,
+        verbose: bool=False
     ):
-        if batch_size is None and device_batch_size is None:
-            raise ValueError("batch_size or device_batch_size must be set")
-        if batch_size is not None and device_batch_size is not None:
-            raise ValueError(
-                "batch_size and device_batch_size cannot be set together"
-            )
-        if device_batch_size is not None:
-            self.batch_size = device_batch_size * n_devices
-            self.device_batch_size = device_batch_size
-        elif batch_size is not None:
-            if batch_size % n_devices != 0:
-                raise ValueError("batch_size must be a multiple of n_devices")
-            self.batch_size = batch_size
-            self.device_batch_size = batch_size // n_devices
+        self.batch_size = batch_size
 
-        self.drafts = drafts
-        # self.targets = drafts['set_id'].astype(jnp.float32)-1
-        self.targets = targets
-        self.set_size = set_size
-        self.set_size_cum = set_size.cumsum()
-        self.max_set_size = set_size.max().item()
-        self.pack_size = pack_size
-        self.n_devices = n_devices
+        cards = []
+        drafts = []
+        offset = 1
+        for i, dl in enumerate(dataloaders):
+            st = time.time()
+            cards.append(collate_cards(dl, nlp_processor))
+            id_map = make_reverse_dict(cards[-1].card_id, offset)
+            cur_drafts = collate_drafts(
+                i+1, dl, s2l_week=s2l_week, pad_id=pad_id, verbose=verbose
+            )
+            cur_drafts = eqx.tree_at(
+                lambda d: d.packs,
+                cur_drafts,
+                id_map[cur_drafts.packs]
+            )
+            cur_drafts = eqx.tree_at(
+                lambda d: d.picks,
+                cur_drafts,
+                id_map[cur_drafts.picks]
+            )
+            drafts.append(cur_drafts)
+            offset += cards[-1].card_id.shape[0]
+            if verbose:
+                print(f"Collating {dl.format} took {time.time() - st:.6f}s")
+        d_t = cards[-1].textual_features.shape[1]
+        d_n = cards[-1].numeric_features.shape[1]
+        cards.insert(0, Cards(
+            card_id=jnp.array([0]),
+            textual_features=jnp.zeros((1, d_t)),
+            numeric_features=jnp.zeros((1, d_n), dtype=jnp.float32)
+        ))
+        self.cards = jax.tree.map(
+            lambda *x: jnp.concatenate(x, axis=0),
+            *cards
+        )
+        self.drafts = jax.tree.map(
+            lambda *x: jnp.concatenate(x, axis=0),
+            *drafts
+        )
+        assert(self.drafts.packs.min() == 0 and self.drafts.picks.min() == 0)
+        if verbose:
+            print(f'Cards use:  {humanfriendly.format_size(sum(
+                jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.cards))
+            )):>9}')
+            print(f'Drafts use: {humanfriendly.format_size(sum(
+                jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.drafts))
+            )):>9}')
+
         self.shuffle = shuffle
         self.rng = np.random.default_rng(seed)
 
-        def build_batch_nodes(
-            padding_nodes: Int,
-            sets: Int[Array, "batch_size"],
-            n_nodes: Int,
-            max_size: Int
-        ) -> Int[Array, "n_nodes"]:
-            # print("compiling", n_nodes, max_size)
-            res = jnp.zeros(n_nodes+max_size, dtype=jnp.int32)
-
-            def apply_set(
-                carry: Tuple[Int, Int[Array, "res_size"]],
-                set_id: Int
-            ) -> Tuple[
-                Tuple[Int, Int[Array, "res_size"]],
-                None
-            ]:
-                pos, out = carry
-                out = jax.lax.dynamic_update_slice(
-                    out,
-                    jnp.zeros(1, dtype=jnp.int32),
-                    [pos]
-                )
-                out = jax.lax.dynamic_update_slice(
-                    out,
-                    jnp.arange(max_size) + self.set_size_cum[set_id-1],
-                    [pos+1]
-                )
-                return ((pos + 1 + set_size[set_id], out), None)
-
-            (_, res), _ = jax.lax.scan(apply_set, (padding_nodes, res), sets)
-
-            return res[:n_nodes]
-
-        def build_edges(
-            set_id: Int,
-            set_size: Int,
-            pack_size: Int,
-            picks_id: Int[Array, "3*pack_size"],
-            packs_ids: Int[Array, "3*pack_size pack_size"],
-            offset: Int
-        ) -> Tuple[
-            Int[Array, "max_set_size+draft_edges"],
-            Int[Array, "max_set_size+draft_edges"],
-            Int[Array, "max_set_size+draft_edges 4*pack_size-1"]
-        ]:
-            indexes = jnp.arange(self.max_set_size, dtype=jnp.int32)
-            global_u = cast(Int[Array, "max_set_size"], jnp.where(
-                indexes < set_size,
-                offset, # Global node
-                0       # Padding node
-            ))
-            global_v = cast(Int[Array, "max_set_size"], jnp.where(
-                indexes < set_size,
-                offset + 1 + indexes, # Card node
-                0                     # Padding node
-            ))
-            global_edges = jnp.full(
-                (self.max_set_size, 4*pack_size-1),
-                0,
-                dtype=jnp.int32
-            )
-
-            tri_i, tri_j = jnp.triu_indices(pack_size)
-            packs_ids_tri = (
-                packs_ids.reshape(
-                            (3, pack_size, pack_size)
-                        )[:, :, ::-1][:, tri_i, tri_j]
-                         .ravel()
-            )
-            picks = (
-                jnp.arange(3*pack_size)
-                   .repeat(pack_size)
-                   .reshape((3*pack_size, pack_size))
-            )
-            picks = (
-                picks.reshape(
-                        (3, pack_size, pack_size)
-                    )[:, :, ::-1][:, tri_i, tri_j]
-                     .ravel()
-            )
-            draft_u = cast(Int[Array, "draft_edges"], jnp.where(
-                packs_ids_tri > 0,
-                offset + 1 + packs_ids_tri - self.set_size_cum[set_id-1],
-                0
-            ))
-            draft_v = cast(Int[Array, "draft_edges"], jnp.where(
-                packs_ids_tri > 0,
-                offset + 1 + picks_id[picks] - self.set_size_cum[set_id-1],
-                0
-            ))
-            draft_edges = jnp.repeat(
-                jnp.concat([
-                    jnp.tril(jnp.tile(picks_id[:-1], (3*pack_size, 1)), k=-1),
-                    packs_ids
-                ], axis=1),
-                jnp.tile(jnp.arange(pack_size)[::-1]+1, 3),
-                axis=0,
-                total_repeat_length=3*pack_size*(pack_size+1)//2
-            )
-
-            return (
-                jnp.concat([global_u, draft_u]),
-                jnp.concat([global_v, draft_v]),
-                jnp.concat([global_edges, draft_edges], axis=0)
-            )
-        build_batch_edges = jax.vmap(build_edges, in_axes=(0, 0, None, 0, 0, 0))
-
-        from beartype import beartype as typechecker
-        from jaxtyping import jaxtyped
-
-        @partial(jax.jit, static_argnums=(1, 3, 4))
-        @partial(jax.vmap, in_axes=(0, None, 0, None, None))
-        @jaxtyped(typechecker=typechecker)
-        def build_graph(
-            idxs: Int[Array, "batch_size"],
-            n_nodes: int,
-            # n_edges: Int,
-            set_sizes: Int[Array, "batch_size"],
-            max_size: int,
-            pack_size: int=15
-        ) -> Tuple[
-            TextGraph,
-            Float[Array, "batch_size"],
-            Float[Array, "batch_size"]
-        ]:
-            padding_nodes = (
-                  n_nodes
-                - (1 + set_sizes).sum()
-            )
-            # padding_edges = (
-            #       n_edges
-            #     - set_sizes.sum()
-            #     - device_batch_size * draft_edges
-            # )
-
-            n_node = jnp.concat([
-                padding_nodes.reshape((1,)),
-                1 + set_sizes
-            ])
-            # n_edge = jnp.concat([
-            #     padding_edges.reshape((1,)),
-            #     set_sizes + draft_edges
-            # ])
-
-            node_features = build_batch_nodes(
-                padding_nodes,
-                drafts['set_id'][idxs],
-                n_nodes,
-                max_size
-            )
-            edges_u, edges_v, edge_features = build_batch_edges(
-                drafts['set_id'][idxs],
-                set_size[drafts['set_id'][idxs]],
-                pack_size,
-                drafts['picks_id'][idxs],
-                drafts['packs_ids'][idxs],
-                n_node.cumsum()[:-1]
-            )
-            edges_u, edges_v = edges_u.ravel(), edges_v.ravel()
-            edge_features = edge_features.reshape((-1, 4*pack_size-1))
-
-            return (
-                TextGraph(
-                    n_nodes=n_node,
-                    # n_edges=n_edge,
-                    node_features=node_features,
-                    edge_features=edge_features,
-                    edges_u=edges_u,
-                    edges_v=edges_v
-                ),
-                # (drafts['set_id'].astype(jnp.float32)-1)[idxs],
-                self.targets[idxs],
-                drafts['weight'][idxs]
-            )
-        self.build_graph = build_graph
-
-    def make_batches(
-        self
-    ) -> Generator[Tuple[
-        TextGraph,
-        Float[Array, "n_devices batch_size"],
-        Float[Array, "n_devices batch_size"]
-    ], None, None]:
-        n_drafts = self.drafts['set_id'].shape[0]
-        n_drafts += (
-            self.n_devices - n_drafts % self.n_devices
-        ) % self.n_devices
-        indices = np.arange(n_drafts) % self.drafts['set_id'].shape[0]
-        if self.shuffle:
-            self.rng.shuffle(indices)
-        indices = jnp.asarray(indices)
-
-        # draft_edges = 3 * (pack_size * (pack_size + 1)) // 2
-        # batch_edges = self.device_batch_size * (self.max_set_size+draft_edges)
-
-        batch_size = self.n_devices * self.device_batch_size
-        for start_idx in range(0, len(indices), batch_size):
-            idxs = indices[start_idx:start_idx + batch_size]
-            idxs = idxs.reshape((self.n_devices, -1))
-            batch_nodes = 1 + idxs.shape[1] * (1+self.max_set_size)
-
-            yield self.build_graph(
-                idxs,
-                batch_nodes,
-                # batch_edges,
-                self.set_size[self.drafts['set_id'][idxs]],
-                self.max_set_size,
-                self.pack_size
-            )
-
-class JaxDraftMultiDataset:
-    def __init__(
+    @jaxtyped(typechecker=typechecker)
+    def run_batches(
         self,
-        drafts: Mapping[str, Array],
-        targets: Array,
-        set_size: Int[Array, "1+n_sets"],
-        pack_size: int=15,
-        n_devices: int=1,
-        device_batch_size: Optional[int]=None,
-        batch_size: Optional[int]=None,
-        shuffle: bool=True,
-        seed: int=42
-    ):
-        if batch_size is None and device_batch_size is None:
-            raise ValueError("batch_size or device_batch_size must be set")
-        if batch_size is not None and device_batch_size is not None:
+        model: eqx.Module,
+        state: eqx.nn.State,
+        opt_state: Any, #optax.OptState,
+        step_fn: Callable[
+            [
+                eqx.Module, eqx.nn.State, Any,
+                Cards, Drafts, PRNGKeyArray
+            ],
+            Tuple[eqx.Module, eqx.nn.State, Any, Float[Array, ""]]
+        ],
+        key: PRNGKeyArray
+    ) -> Tuple[
+        eqx.Module, eqx.nn.State, Any, PRNGKeyArray,
+        Float[Array, "n_batches"]
+    ]:
+        n_samples = self.drafts.picks.shape[0]
+        if 2 * n_samples < self.batch_size:
             raise ValueError(
-                "batch_size and device_batch_size cannot be set together"
+                f"Batch size is too large for the dataset (n={n_samples})"
             )
-        if device_batch_size is not None:
-            self.batch_size = device_batch_size * n_devices
-            self.device_batch_size = device_batch_size
-        elif batch_size is not None:
-            if batch_size % n_devices != 0:
-                raise ValueError("batch_size must be a multiple of n_devices")
-            self.batch_size = batch_size
-            self.device_batch_size = batch_size // n_devices
-
-        self.n_sets = drafts['set_id'].max()
-        assert(drafts['set_id'].min() > 0)
-
-        self.drafts = [
-            {
-                field: drafts[field][drafts['set_id'] == i_set+1]
-                for field in drafts
-            }
-            for i_set in range(self.n_sets)
-        ]
-        self.targets = [
-            targets[drafts['set_id'] == i_set+1]
-            for i_set in range(self.n_sets)
-        ]
-        self.set_size = set_size
-        self.set_size_cum = set_size.cumsum()
-        self.max_set_size = set_size.max().item()
-        self.pack_size = pack_size
-        self.n_devices = n_devices
-        self.shuffle = shuffle
-        self.rng = np.random.default_rng(seed)
-
-        def build_edges(
-            set_id: Int,
-            set_size: Int,
-            pack_size: Int,
-            picks_id: Int[Array, "3*pack_size"],
-            packs_ids: Int[Array, "3*pack_size pack_size"],
-            offset: Int
-        ) -> Tuple[
-            Int[Array, "max_set_size+draft_edges"],
-            Int[Array, "max_set_size+draft_edges"],
-            Int[Array, "max_set_size+draft_edges 4*pack_size-1"]
-        ]:
-            indexes = jnp.arange(self.max_set_size, dtype=jnp.int32)
-            global_u = cast(Int[Array, "max_set_size"], jnp.where(
-                indexes < set_size,
-                offset, # Global node
-                0       # Padding node
-            ))
-            global_v = cast(Int[Array, "max_set_size"], jnp.where(
-                indexes < set_size,
-                offset + 1 + indexes, # Card node
-                0                     # Padding node
-            ))
-            global_edges = jnp.full(
-                (self.max_set_size, 4*pack_size-1),
-                0,
-                dtype=jnp.int32
-            )
-
-            tri_i, tri_j = jnp.triu_indices(pack_size)
-            packs_ids_tri = (
-                packs_ids.reshape(
-                            (3, pack_size, pack_size)
-                        )[:, :, ::-1][:, tri_i, tri_j]
-                         .ravel()
-            )
-            picks = (
-                jnp.arange(3*pack_size)
-                   .repeat(pack_size)
-                   .reshape((3*pack_size, pack_size))
-            )
-            picks = (
-                picks.reshape(
-                        (3, pack_size, pack_size)
-                    )[:, :, ::-1][:, tri_i, tri_j]
-                     .ravel()
-            )
-            draft_u = cast(Int[Array, "draft_edges"], jnp.where(
-                packs_ids_tri > 0,
-                offset + 1 + packs_ids_tri - self.set_size_cum[set_id-1],
-                0
-            ))
-            draft_v = cast(Int[Array, "draft_edges"], jnp.where(
-                packs_ids_tri > 0,
-                offset + 1 + picks_id[picks] - self.set_size_cum[set_id-1],
-                0
-            ))
-            draft_edges = jnp.repeat(
-                jnp.concat([
-                    jnp.tril(jnp.tile(picks_id[:-1], (3*pack_size, 1)), k=-1),
-                    packs_ids
-                ], axis=1),
-                jnp.tile(jnp.arange(pack_size)[::-1]+1, 3),
-                axis=0,
-                total_repeat_length=3*pack_size*(pack_size+1)//2
-            )
-
-            return (
-                jnp.concat([global_u, draft_u]),
-                jnp.concat([global_v, draft_v]),
-                jnp.concat([global_edges, draft_edges], axis=0)
-            )
-        build_batch_edges = jax.vmap(build_edges, in_axes=(None, None, None, 0, 0, 0))
-
-        from beartype import beartype as typechecker
-        from jaxtyping import jaxtyped
-
-        @partial(jax.jit, static_argnums=(1, 2, 3))
-        @partial(jax.vmap, in_axes=(0, None, None, None))
-        @jaxtyped(typechecker=typechecker)
-        def build_graph(
-            idxs: Int[Array, "batch_size"],
-            # n_nodes: int,
-            # n_edges: Int,
-            set_size: int,
-            set_id: int,
-            pack_size: int=15
-        ) -> Tuple[
-            Int[Array, 'n_cards'],
-            TextGraph,
-            Float[Array, "batch_size"],
-            Float[Array, "batch_size"]
-        ]:
-            # print("compiling", n_nodes, max_size)
-
-            # padding_nodes = (
-            #       n_nodes
-            #     - (1 + set_sizes).sum()
-            # )
-            # padding_edges = (
-            #       n_edges
-            #     - set_sizes.sum()
-            #     - device_batch_size * draft_edges
-            # )
-
-            n = idxs.shape[0]
-            n_node = jnp.array([1] + [1+set_size] * n, dtype=jnp.int32)
-
-            node_features = jnp.concat([
-                jnp.zeros(1, dtype=jnp.int32),
-                jnp.tile(jnp.concat([
-                    jnp.zeros(1, dtype=jnp.int32),
-                    jnp.arange(set_size) + 1
-                ]), n)
+        indices = np.arange(n_samples)
+        if n_samples % self.batch_size != 0:
+            indices = np.concat([
+                indices,
+                self.rng.choice(
+                    indices,
+                    size=self.batch_size - (n_samples % self.batch_size),
+                    replace=False
+                )
             ])
-            edges_u, edges_v, edge_features = build_batch_edges(
-                set_id,
-                set_size,
-                pack_size,
-                self.drafts[set_id-1]['picks_id'][idxs],
-                self.drafts[set_id-1]['packs_ids'][idxs],
-                n_node.cumsum()[:-1]
-            )
-            edges_u, edges_v = edges_u.ravel(), edges_v.ravel()
-            edge_features = edge_features.reshape((-1, 4*pack_size-1))
-            edge_features = jnp.where(
-                edge_features == 0,
-                0,
-                edge_features - self.set_size_cum[set_id-1] + 1
-            )
-
-            return (
-                jnp.concat([
-                    jnp.zeros(1, dtype=jnp.int32),
-                    jnp.arange(set_size) + self.set_size_cum[set_id-1]
-                ]),
-                TextGraph(
-                    n_nodes=n_node,
-                    # n_edges=n_edge,
-                    node_features=node_features,
-                    edge_features=edge_features,
-                    edges_u=edges_u,
-                    edges_v=edges_v
-                ),
-                self.targets[set_id-1][idxs],
-                self.drafts[set_id-1]['weight'][idxs]
-            )
-        self.build_graph = build_graph
-
-    def make_set_batches(self, i_set, batch_size):
-        n_drafts = self.drafts[i_set]['set_id'].shape[0]
-        n_batches = (n_drafts + batch_size - 1) // batch_size
-        extra_drafts = n_batches * batch_size - n_drafts
-        indices = np.arange(n_drafts)
-        self.rng.shuffle(indices)
-        indices = np.concatenate([indices, indices[:extra_drafts]])
         if self.shuffle:
             self.rng.shuffle(indices)
-        return jnp.asarray(indices).reshape((n_batches, batch_size))
+        indices = jnp.array(indices).reshape((-1, self.batch_size))
 
-    def n_batches(self):
-        batch_size = self.n_devices * self.device_batch_size
-        batches = [
-            self.make_set_batches(i_set, batch_size)
-            for i_set in range(self.n_sets)
-        ]
-        return sum([len(set_batches) for set_batches in batches])
-
-    def make_batches(
-        self
-    ) -> Generator[Tuple[
-        Int[Array, 'set_size+1'],
-        TextGraph,
-        Float[Array, "n_devices batch_size"],
-        Float[Array, "n_devices batch_size"]
-    ], None, None]:
-        batch_size = self.n_devices * self.device_batch_size
-        batches = [
-            self.make_set_batches(i_set, batch_size)
-            for i_set in range(self.n_sets)
-        ]
-        batch_order = sum([
-            list(zip([i_set] * len(set_batches), range(len(set_batches))))
-            for i_set, set_batches in enumerate(batches)
-        ], [])
-        if self.shuffle:
-            self.rng.shuffle(batch_order)
-
-        # draft_edges = 3 * (pack_size * (pack_size + 1)) // 2
-        # batch_edges = self.device_batch_size * (self.max_set_size+draft_edges)
-
-        for i_set, i_batch in batch_order:
-            idxs = batches[i_set][i_batch]
-            idxs = idxs.reshape((self.n_devices, -1))
-            batch_nodes = 1 + idxs.shape[1] * (1+self.set_size[i_set+1])
-
-            yield self.build_graph(
-                idxs,
-                # batch_nodes,
-                # batch_edges,
-                self.set_size[i_set+1].item(),
-                i_set+1,
-                self.pack_size
+        def foo(
+            carry: Tuple[
+                eqx.Module, eqx.nn.State, Any, PRNGKeyArray
+            ],
+            idx: Int[Array, "bs"]
+        ) -> Tuple[
+            Tuple[eqx.Module, eqx.nn.State, Any, PRNGKeyArray],
+            Float[Array, "1"]
+        ]:
+            model, state, opt_state, key = carry
+            key, subkey = jax.random.split(key)
+            model, state, opt_state, output = step_fn(
+                model, state, opt_state,
+                self.cards, self.drafts[idx], subkey
             )
+            return (model, state, opt_state, key), output
+
+        (model, state, opt_state, key), outputs = jax.lax.scan(
+            foo,
+            (model, state, opt_state, key),
+            indices
+        )
+        return model, state, opt_state, key, outputs
 
 def train_test_split(df, test_size=0.2, seed=0):
     return df.with_columns(
