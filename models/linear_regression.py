@@ -9,7 +9,9 @@ from data_types import Cards, Drafts
 class LinearRegression(eqx.Module):
     linear: eqx.nn.Linear
 
-    def __init__(self, key: PRNGKeyArray, d_t: int, d_n: int):
+    def __init__(self, key: PRNGKeyArray, cards: Cards):
+        d_t = cards.textual_features.shape[1]
+        d_n = cards.numeric_features.shape[1]
         key, subkey = jax.random.split(key)
         self.linear = eqx.nn.Linear(
             in_features=45*(d_t+d_n),
