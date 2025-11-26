@@ -1,0 +1,34 @@
+name: Scale1DraftGraph
+train_set:
+  - MOM
+  - WOE
+  - LCI
+  - MKM
+  - OTJ
+  - BLB
+  - DSK
+  - DFT
+  - TDM
+  - FIN
+val_set:
+  - EOE
+  # - ONE # /!\ Only 3 weeks of data /!\
+test_set:
+  - FDN
+time_window: 21
+model:
+  - DraftGraph
+  - LinearRegression
+model_params:
+  - d_model: 64
+    dropout_p: 0.1
+    lr: 1e-5
+  - lr: 1e-4
+    scheduler_params:
+      cooldown: 0
+epochs: 500
+batch_size: 2048
+scheduler_params:
+  factor: 0.5
+  patience: 10
+  cooldown: 50

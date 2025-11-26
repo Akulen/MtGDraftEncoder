@@ -1,0 +1,37 @@
+name: BaseDraftGraph
+train_set:
+  - ONE # /!\ Only 3 weeks of data /!\
+  - MOM
+  - WOE
+  - LCI
+  - MKM
+  - OTJ
+  - BLB
+  - DSK
+  - DFT
+  - TDM
+  - FIN
+  - EOE
+test_set:
+  - FDN
+time_window: 21
+model:
+  - DraftGraph
+  - DraftGraph
+  - DraftGraph
+  - DraftGraph
+model_params:
+  - d_model: 64
+    dropout_p: 0.05
+  - d_model: 64
+    dropout_p: 0.1
+  - d_model: 64
+    dropout_p: 0.05
+    lr: 1e-6
+  - d_model: 64
+    dropout_p: 0.1
+    lr: 1e-6
+epochs: 200
+batch_size: 1024
+lr:
+  - 1e-5

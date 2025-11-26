@@ -1,8 +1,29 @@
 name: BaseLinearRegression
 train_set:
-  - ONE
+  - MOM
+  - WOE
+  - LCI
+  - MKM
+  - OTJ
+  - BLB
+  - DSK
   - DFT
-temporal_split: true
-model: LinearRegression
+  - TDM
+  - FIN
+val_set:
+  - EOE
+  # - ONE # /!\ Only 3 weeks of data /!\
+test_set:
+  - FDN
+time_window: 21
+model:
+  - LinearRegression
+  - LinearRegression
+model_params:
+  - scheduler_params:
+      patience: 10
+  - scheduler_params:
+      cooldown: 5
 epochs: 100
-batch_size: 256
+batch_size: 1024
+lr: 1e-4

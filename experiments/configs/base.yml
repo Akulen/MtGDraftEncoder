@@ -1,0 +1,27 @@
+name: Base
+train_set:
+  - ONE # /!\ Only 3 weeks of data /!\
+  - MOM
+  - WOE
+  - LCI
+  - MKM
+  - OTJ
+  - BLB
+  - DSK
+  - DFT
+  - TDM
+  - FIN
+  - EOE
+test_set:
+  - FDN
+time_window: 21
+model:
+  - DraftGraph
+  - LinearRegression
+model_params:
+  - d_model: 64
+    dropout_p: 0.1
+    lr: 1e-6
+  - lr: 1e-4
+epochs: 500
+batch_size: 1024
