@@ -1,20 +1,27 @@
+from abc import abstractmethod, ABC
 from collections import Counter
 import json
 import re
 import numpy as np
 import polars as pl
 import torch
+from typing import List
+from jaxtyping import ArrayLike, Real
 from huggingface_hub import login
 from sentence_transformers import SentenceTransformer
 
 with open('tokens.json', 'r') as f:
     auth_tokens = json.load(f)
 
-class simplestr(type):
+class NLPProcessor(ABC):
+    @abstractmethod
+    def __call__(self, x: List[str]) -> Real[ArrayLike, "n d"]:
+        pass
+
     def __str__(self):
         return self.__name__
 
-class SimpleTokenizer(metaclass=simplestr):
+class SimpleTokenizer(NLPProcessor):
     def __init__(self, data=None, max_seq_length=150, device=None):
         self.max_seq_length = max_seq_length
         self.device = device
@@ -50,21 +57,20 @@ class SimpleTokenizer(metaclass=simplestr):
     def vocab_size(self):
         return len(self.vocab)
 
-    def __call__(self, text, dtype=torch.int16):
-        assert(torch.iinfo(dtype).max >= max(self.vocab.values()))
+    def __call__(self, text: List[str]) -> Real[ArrayLike, "n d"]:
+        # assert(torch.iinfo(dtype).max >= max(self.vocab.values()))
         tokens = self.tokenize(text)
-        return torch.tensor(
+        return np.array(
             [
                 [self.vocab.get(token, self.vocab["<unk>"]), 1]
                 for token in tokens
             ] + [
                 [self.vocab['<pad>'], 0]
             ] * (self.max_seq_length - len(tokens)),
-            dtype=torch.int16
-        ).transpose(-1, -2) \
-         .to(self.device)
+            dtype=np.int16
+        ).transpose(-1, -2)
 
-class Gemma:
+class Gemma(NLPProcessor):
     def __init__(self, d_encoder=768, device=None):
         login(token=auth_tokens['huggingface'])
         if device is None:
@@ -74,5 +80,5 @@ class Gemma:
             model_id, truncate_dim=d_encoder, device=device
         ).to(device=device)
 
-    def __call__(self, x: str) -> np.ndarray:
+    def __call__(self, x: List[str]) -> Real[ArrayLike, "n d"]:
         return self.model.encode(x)
