@@ -1,7 +1,12 @@
+from models._types import DraftWRPredictor
+
+from models.draft_graph import DraftGraph
 from models.linear_regression import LinearRegression
 
 def get_model(model_name: str):
     match model_name:
+        case 'DraftGraph':
+            return DraftGraph
         case 'LinearRegression':
             return LinearRegression
         case _:
