@@ -9,6 +9,7 @@ from typing import cast, List
 from replay_dtypes import get_dtypes
 
 os.makedirs('data', exist_ok=True)
+CSI = "\x1b[" #]
 
 @cache
 def get_all_cards():
@@ -147,6 +148,7 @@ def full_oracle_polars_V1(df):
 def get_mana_value(mana_cost):
     return pl.when(mana_cost.str.contains('//')).then(pl.lit('-1')).otherwise(
         mana_cost
+        .str.replace_all(r'\{C\}', '+1')
         .str.replace_all(r'\{W\}', '+1')
         .str.replace_all(r'\{U\}', '+1')
         .str.replace_all(r'\{B\}', '+1')
@@ -288,26 +290,24 @@ def make_oracle(df):
     ).collect()
     # if len(df_cards.filter(pl.col('oracle').is_null())) > 0:
     #     print(
-    #         '\033[31mSome cards were not found. This could be caused by '
+    #         f'{CSI}31mSome cards were not found. This could be caused by '
     #         'double-faced cards. To fix those, add them to the dbl_face '
     #         'dictionary argument, using the following suggestions:'
     #     )
     #     missing = df_cards.filter(pl.col('oracle').is_null())['name']
     #     for name in missing:
-    #         print(f'\033[34m[{name}]')
+    #         print(f'{CSI}34m[{name}]')
     #         for cand in self.oracle_data.filter(
     #             pl.col('name').str.starts_with(name)
     #         )['name'].to_list():
-    #             print(f'\t\033[32m{cand}\033[0m')
+    #             print(f'\t{CSI}32m{cand}{CSI}0m')
     #     import sys
     #     sys.exit(1)
-    return full_oracle_polars(entries)['oracle']
+    return full_oracle_polars(entries)
 
-def get_draft_data(df_cards, ext, pack_size=None, pad_id=0) -> pl.LazyFrame:
+@cache
+def get_draft_df(ext):
     filename = f'data/draft_data_public.{ext}.PremierDraft'
-    if os.path.isfile(f"{filename}.compact.parquet"):
-        return pl.scan_parquet(f"{filename}.compact.parquet")
-
     url = (
         'https://17lands-public.s3.amazonaws.com/analysis_data/'
         f"draft_{filename}.csv.gz"
@@ -323,10 +323,40 @@ def get_draft_data(df_cards, ext, pack_size=None, pad_id=0) -> pl.LazyFrame:
         df.sink_parquet(f"{filename}.parquet")
     else:
         df = pl.scan_parquet(f"{filename}.parquet")
+    return df
+
+def fix_split_names(df_cards, ext, verbose=False):
+    df = get_draft_df(ext)
+    for column in df.collect_schema().names():
+        if column[:5] == 'pool_':
+            name = column[5:]
+            if len(df_cards.filter(pl.col('name')==name)['id']) == 1:
+                continue
+            if len(df_cards.filter(pl.col('full_name')==name)['id']) != 1:
+                print(f'{CSI}31mCard not found:')
+                print(f'{CSI}34m[{column}] {CSI}32m{name}{CSI}0m')
+                import sys
+                sys.exit()
+            if verbose:
+                print(f'{CSI}34mRenaming{CSI}32m {df_cards.filter(pl.col("full_name")==name)['name'].item()}{CSI}34m to {CSI}32m{name}{CSI}0m')
+            df_cards = df_cards.with_columns(
+                pl.when(pl.col('full_name') == name)
+                .then(pl.lit(name))
+                .otherwise(pl.col('name'))
+                .alias('name')
+            )
+    return df_cards
+
+def get_draft_data(df_cards, ext, pack_size=None, pad_id=0) -> pl.LazyFrame:
+    filename = f'data/draft_data_public.{ext}.PremierDraft'
+    if os.path.isfile(f"{filename}.compact.parquet"):
+        return pl.scan_parquet(f"{filename}.compact.parquet")
+
+    df = get_draft_df(ext)
 
     if pack_size is None:
         from collections import Counter
-        distrib = df.collect().sample(4000000).lazy().group_by('draft_id').len()
+        distrib = df.group_by('draft_id').len()
         counts = distrib.select(pl.col('len')).collect().to_numpy()
         cnt = Counter()
         for c in counts:
@@ -363,8 +393,8 @@ def get_draft_data(df_cards, ext, pack_size=None, pad_id=0) -> pl.LazyFrame:
                             .item()
                 )
             except ValueError:
-                print('\033[31mCard not found:')
-                print(f'\033[34m[{column}] \033[32m{name}\033[0m')
+                print(f'{CSI}31mCard not found:')
+                print(f'{CSI}34m[{column}] {CSI}32m{name}{CSI}0m')
                 import sys
                 sys.exit()
 
@@ -466,8 +496,9 @@ def get_card_stats(df_cards, ext, include_ext=False) -> pl.DataFrame:
 
     c, cs = set(df_cards['name']), set(df_stats['name'])
     if len(c) != len(cs) or len(c - cs) > 0:
-        print(f'\033[33mWarning: Game card stats probably outdated for {ext}\033[0m')
-        print(f'\033[34m{len(c)} cards requested, but {len(cs)} card stats found.\033[0m')
+        print(f'{CSI}33mWarning: Game card stats probably outdated for {ext}{CSI}0m')
+        print(f'{CSI}34m{len(c)} cards requested, but {len(cs)} card stats found.{CSI}0m')
+        print(f'{c-cs} | {cs-c}')
         # raise Exception(f'Game card stats outdated for {ext}')
     df_cards = df_cards.join(df_stats, on='name', how='left')
 
