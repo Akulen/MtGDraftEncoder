@@ -1,32 +1,51 @@
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-from typing import Tuple
+from typing import List, Tuple
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from data_types import Cards, Drafts
+from models._types import DraftWRPredictor
+from data_types import Cards, Sets, Drafts
 
-class LinearRegression(eqx.Module):
-    linear: eqx.nn.Linear
+class LinearRegression(DraftWRPredictor):
+    linear: List[eqx.nn.Linear]
 
     def __init__(self, key: PRNGKeyArray, cards: Cards):
         d_t = cards.textual_features.shape[1]
         d_n = cards.numeric_features.shape[1]
         key, subkey = jax.random.split(key)
-        self.linear = eqx.nn.Linear(
-            in_features=45*(d_t+d_n),
-            out_features=1,
-            key=subkey
-        )
+        self.linear = [
+            eqx.nn.Linear(
+                in_features=(i+1)*(d_t+d_n),
+                out_features=1,
+                key=subkey
+            )
+            for i in range(45)
+        ]
 
     def __call__(self,
-        key: PRNGKeyArray, cards: Cards, drafts: Drafts, state: eqx.nn.State
-    ) -> Tuple[Float[Array, ""], eqx.nn.State]:
+        key: PRNGKeyArray,
+        cards: Cards,
+        sets: Sets,
+        drafts: Drafts,
+        state: eqx.nn.State,
+        inference: bool=False
+    ) -> Tuple[Float[Array, "45"], eqx.nn.State]:
         del key
+        del sets
+        del inference
         assert jnp.issubdtype(cards.textual_features.dtype, jnp.floating)
-        picked_cards = drafts.picks # batch_size x 45
-        x = jnp.concat([
-            cards.textual_features[picked_cards],
-            cards.numeric_features[picked_cards]
-        ], axis=1).reshape((-1))
-        return self.linear(x).squeeze(), state
+        picked_cards = drafts.picks # 45
+        picked_data = jnp.where(
+            (picked_cards == 0).reshape((-1, 1)),
+            0,
+            jnp.concat([
+                cards.textual_features[picked_cards],
+                cards.numeric_features[picked_cards]
+            ], axis=1)
+        )
+        x = [
+            self.linear[i-1](picked_data[:i].reshape((-1))).squeeze()
+            for i in range(1, 46)
+        ]
+        return jnp.stack(x), state
