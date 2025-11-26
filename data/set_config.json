@@ -193,5 +193,44 @@
             "Skysovereign, Consul Flagship"
         ],
         "pack_size": 14
+    },
+    "TDM": {
+        "stlands": "TDM",
+        "expansions": ["TDM"],
+        "special_guests": [
+            "Eerie Ultimatum",
+            "Emergent Ultimatum",
+            "Genesis Ultimatum",
+            "Inspired Ultimatum",
+            "Ruinous Ultimatum",
+            "Arid Mesa",
+            "Marsh Flats",
+            "Misty Rainforest",
+            "Scalding Tarn",
+            "Verdant Catacombs"
+        ],
+        "pack_size": 14
+    },
+    "FIN": {
+        "stlands": "FIN",
+        "expansions": ["FIN", "FCA"],
+        "pack_size": 14
+    },
+    "EOE": {
+        "stlands": "EOE",
+        "expansions": ["EOE", "EOS"],
+        "special_guests": [
+            "Warping Wail",
+            "Deafening Silence",
+            "Robe of Stars",
+            "Nexus of Fate",
+            "Paradox Haze",
+            "Darkness",
+            "Magus of the Moon",
+            "Burgeoning",
+            "Green Sun's Zenith",
+            "Sliver Overlord"
+        ],
+        "pack_size": 13
     }
 }
