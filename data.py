@@ -6,7 +6,7 @@ if __name__ == "__main__":
     print(f"XLA_PYTHON_CLIENT_ALLOCATOR set to: {os.environ.get('XLA_PYTHON_CLIENT_ALLOCATOR')}")
     print(f"CUDA_VISIBLE_DEVICES set to: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
-from functools import cache
+from functools import cache, partial
 import datetime
 import humanfriendly
 import json
@@ -20,15 +20,17 @@ import jax.numpy as jnp
 from beartype import beartype as typechecker
 from jaxtyping import jaxtyped, Array, Float, Int, PRNGKeyArray
 from typing import Mapping
-import optax
 import equinox as eqx
 
 import time
 
-from data_types import Cards, Drafts
+from models import DraftWRPredictor
+from nlp import NLPProcessor
+from data_types import Cards, Sets, Drafts
 from card_utils import (
-    get_all_cards, make_oracle, get_draft_data, get_card_stats
+    get_all_cards, make_oracle, fix_split_names, get_draft_data, get_card_stats
 )
+from training import Trainer
 
 os.makedirs('data', exist_ok=True)
 CSI = "\x1b[" #]
@@ -43,6 +45,7 @@ class DL17Lands(Dataset):
         st = time.time()
         self.format = format
         self.all_cards = get_all_cards()
+        self.verbose = verbose
         if verbose:
             print(f"Loading {format}")
             print('-' * 11)
@@ -90,13 +93,17 @@ class DL17Lands(Dataset):
             )
         )
         # Split cards are listed 3 times (once fully, then once for each half).
-        # so we drop the half cards
+        # so we drop the half cards, then rename the full to keep only the
+        # first half
         split_cards = (
             df_cards.filter(pl.col('name').str.contains('//'))['name']
             .str.split(by=' // ')
         ).explode()
         df_cards = df_cards.filter(
             ~pl.col('name').is_in(split_cards.implode())
+        )
+        df_cards = df_cards.with_columns(
+            name=pl.col('name').str.split(by=' // ').list.get(0)
         )
         # Drop duplicate basics
         # Stopped the assert as list cards can be duplicates
@@ -106,9 +113,12 @@ class DL17Lands(Dataset):
         # assert(len(dup_rarities) == 1 and dup_rarities[0] == 'basic')
         df_cards = df_cards.unique(subset='name')
 
+        oracle = make_oracle(df_cards)
         df_cards = df_cards.with_columns(
-            oracle=make_oracle(df_cards)
+            oracle=oracle['oracle'],
+            full_name=oracle['name']
         )
+        df_cards = fix_split_names(df_cards, stlands, verbose=self.verbose)
 
         df_drafts = get_draft_data(df_cards, stlands, pack_size, pad_id)
 
@@ -117,18 +127,19 @@ class DL17Lands(Dataset):
         return df_cards, df_drafts
 
 
-ONE_WEEK = datetime.timedelta(days=7)
 def collate_drafts(
     set_id: int,
     dl: DL17Lands,
-    s2l_week: bool=False,
+    time_offset: int=0,
+    time_window: int=7,
     first_n: int=-1,
     pad_id: int=0,
     verbose: bool= False,
 ) -> Drafts:
     cache = f'drafts_{dl.format}'
-    if s2l_week:
-        cache += '_s2l'
+    if time_offset > 0:
+        cache += f'_skip-{time_offset}'
+    cache += f'_{time_window}-days'
     if first_n > 0:
         cache += f'_first-{first_n}'
     if pad_id != 0:
@@ -136,6 +147,7 @@ def collate_drafts(
     if os.path.exists(f'cache/{cache}.pickle'):
         return pickle.load(open(f'cache/{cache}.pickle', 'rb'))
     assert(len(dl.all_cards.filter(pl.col('id') == pad_id)) == 0)
+    PERIOD = datetime.timedelta(days=time_window)
     draft_start = (dl.drafts
         .select(pl.col('draft_time'))
         .min()
@@ -148,19 +160,22 @@ def collate_drafts(
         .collect()['draft_time']
         .str.to_datetime()[0]
     )
-    first_draft = last_draft - ONE_WEEK
+    first_draft = last_draft - PERIOD
     if verbose:
         print(
             f"All drafts:         {CSI}31m{draft_start}{CSI}0m"
             f" to {CSI}32m{last_draft}{CSI}0m"
         )
-    if s2l_week:
-        first_draft, last_draft = first_draft - ONE_WEEK, first_draft
+    OFFSET = datetime.timedelta(days=time_offset)
+    first_draft = first_draft - OFFSET
+    last_draft = last_draft - OFFSET
     if verbose:
         print(
             f"Picking drafts from {CSI}34m{first_draft}{CSI}0m"
             f" to {CSI}32m{last_draft}{CSI}0m"
         )
+    if draft_start > first_draft + datetime.timedelta(days=1):
+        print(f'{CSI}33mWarning: {CSI}34mDraft period starts ({CSI}32m{first_draft}{CSI}34m) significantly earlier than first draft ({CSI}32m{draft_start}{CSI}34m).{CSI}0m')
     n_picks = dl.pack_size * 3
     drafts = (dl.drafts
         .filter(pl.col('draft_time').str.to_datetime().is_between(
@@ -216,10 +231,10 @@ def collate_drafts(
     pickle.dump(drafts, open(f'cache/{cache}.pickle', 'wb'))
     return drafts
 
-def collate_cards(dt: DL17Lands, nlp_processor) -> Cards:
+def collate_cards(dt: DL17Lands, nlp_processor: NLPProcessor) -> Cards:
     return Cards(
         card_id=jnp.array(dt.cards['id'].to_numpy()),
-        textual_features=jnp.array(nlp_processor(dt.cards['oracle'])),
+        textual_features=jnp.array(nlp_processor(dt.cards['oracle'].to_list())),
         numeric_features=jnp.transpose(jnp.array([
             dt.cards[category]
             for category in [
@@ -239,8 +254,9 @@ class JaxDraftDataset:
     def __init__(
         self,
         dataloaders: List[DL17Lands],
-        nlp_processor: Callable[[str], np.ndarray],
-        s2l_week: bool=False,
+        nlp_processor: NLPProcessor,
+        time_offset: int=0,
+        time_window: int=7,
         pad_id: int=0,
         batch_size: int=32,
         shuffle: bool=True,
@@ -248,16 +264,24 @@ class JaxDraftDataset:
         verbose: bool=False
     ):
         self.batch_size = batch_size
+        self.rng = np.random.default_rng(seed)
 
         cards = []
+        sets = []
         drafts = []
         offset = 1
         for i, dl in enumerate(dataloaders):
             st = time.time()
             cards.append(collate_cards(dl, nlp_processor))
             id_map = make_reverse_dict(cards[-1].card_id, offset)
+            sets.append(Sets(
+                card_ids=id_map[cards[-1].card_id],
+                set_size=cards[-1].card_id.shape[0],
+                pack_size=dl.pack_size
+            ))
             cur_drafts = collate_drafts(
-                i+1, dl, s2l_week=s2l_week, pad_id=pad_id, verbose=verbose
+                i, dl, time_offset=time_offset, time_window=time_window,
+                pad_id=pad_id, verbose=verbose
             )
             cur_drafts = eqx.tree_at(
                 lambda d: d.packs,
@@ -280,15 +304,46 @@ class JaxDraftDataset:
             textual_features=jnp.zeros((1, d_t)),
             numeric_features=jnp.zeros((1, d_n), dtype=jnp.float32)
         ))
+        max_set_size = max(s.set_size for s in sets)
+        for i in range(len(sets)):
+            sets[i] = eqx.tree_at(
+                lambda s: s.card_ids,
+                sets[i],
+                jnp.pad(
+                    sets[i].card_ids,
+                    ((0, max_set_size - sets[i].set_size),),
+                    constant_values=pad_id
+                )
+            )
         self.cards = jax.tree.map(
             lambda *x: jnp.concatenate(x, axis=0),
             *cards
+        )
+        self.sets = jax.tree.map(
+            lambda *x: jnp.stack(x),
+            *sets
         )
         self.drafts = jax.tree.map(
             lambda *x: jnp.concatenate(x, axis=0),
             *drafts
         )
         assert(self.drafts.packs.min() == 0 and self.drafts.picks.min() == 0)
+        n_samples = self.drafts.picks.shape[0]
+        if 2 * n_samples < self.batch_size:
+            raise ValueError(
+                f"Batch size is too large for the dataset (n={n_samples})"
+            )
+        if n_samples % self.batch_size != 0:
+            duplicate = self.rng.choice(
+                jnp.arange(n_samples),
+                size=self.batch_size - (n_samples % self.batch_size),
+                replace=False
+            )
+            self.drafts = jax.tree.map(
+                lambda leaf: jnp.concatenate((leaf, leaf[duplicate]), axis=0),
+                self.drafts
+            )
+
         if verbose:
             print(f'Cards use:  {humanfriendly.format_size(sum(
                 jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.cards))
@@ -298,68 +353,108 @@ class JaxDraftDataset:
             )):>9}')
 
         self.shuffle = shuffle
-        self.rng = np.random.default_rng(seed)
+        self.step_fn = None
+        self.trainer = None
+        self.compiled = False
+
+    def n_steps(self) -> int:
+        return self.drafts.picks.shape[0] // self.batch_size
+
+    def shard_data(self, trainer: Trainer):
+        self.trainer = trainer
+        self.cards, self.sets = trainer.shard_model(
+            self.cards, self.sets
+        )
+        self.drafts = trainer.shard_data(self.drafts)
+
+    def set_step_function(self,
+        static: DraftWRPredictor,
+        step_fn: Callable[
+            [
+                DraftWRPredictor, eqx.nn.State, Any, Any,
+                Cards, Sets, Drafts, PRNGKeyArray
+            ],
+            Tuple[DraftWRPredictor, eqx.nn.State, Any, Float[Array, ""]]
+        ]
+    ):
+        def foo(
+            carry: Tuple[
+                DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray
+            ],
+            idx: Int[Array, "bs"],
+            static: DraftWRPredictor,
+            cards: Cards, sets: Sets, drafts: Drafts
+        ) -> Tuple[
+            Tuple[DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray],
+            Float[Array, "1"]
+        ]:
+            params, state, opt_state, lr_transform_state, key = carry
+            model = eqx.combine(params, static)
+            key, subkey = jax.random.split(key)
+            model, state, opt_state, output = step_fn(
+                model, state, opt_state, lr_transform_state,
+                cards, sets, drafts[idx], subkey
+            )
+            params, _ = eqx.partition(model, eqx.is_array)
+            return (params, state, opt_state, lr_transform_state, key), output
+        self.step_fn = partial(
+            foo, static=static,
+            cards=self.cards, sets=self.sets, drafts=self.drafts
+        )
+        self.scan_fn = partial(jax.lax.scan, f=self.step_fn)
+        self.compiled = False
+
+    def precompile(
+        self,
+        params: DraftWRPredictor,
+        state: eqx.nn.State,
+        opt_state: Any, #optax.OptState,
+        lr_transform_state: Any,
+        key: PRNGKeyArray
+    ):
+        if self.compiled:
+            return
+        indices = (
+            jnp.arange(self.drafts.picks.shape[0])
+               .reshape((-1, self.batch_size))
+        )
+        if self.trainer is not None:
+            indices = self.trainer.shard_model(indices)
+        self.scan_fn = jax.jit(self.scan_fn).trace( #type: ignore
+            init=(params, state, opt_state, lr_transform_state, key),
+            xs=indices
+        ).lower().compile()
+        self.compiled = True
 
     @jaxtyped(typechecker=typechecker)
     def run_batches(
         self,
-        model: eqx.Module,
+        params: DraftWRPredictor,
         state: eqx.nn.State,
         opt_state: Any, #optax.OptState,
-        step_fn: Callable[
-            [
-                eqx.Module, eqx.nn.State, Any,
-                Cards, Drafts, PRNGKeyArray
-            ],
-            Tuple[eqx.Module, eqx.nn.State, Any, Float[Array, ""]]
-        ],
+        lr_transform_state: Any,
         key: PRNGKeyArray
     ) -> Tuple[
-        eqx.Module, eqx.nn.State, Any, PRNGKeyArray,
+        DraftWRPredictor, eqx.nn.State, Any, PRNGKeyArray,
         Float[Array, "n_batches"]
     ]:
+        if self.step_fn is None:
+            raise ValueError("step_fn is not set")
+
         n_samples = self.drafts.picks.shape[0]
-        if 2 * n_samples < self.batch_size:
-            raise ValueError(
-                f"Batch size is too large for the dataset (n={n_samples})"
-            )
         indices = np.arange(n_samples)
-        if n_samples % self.batch_size != 0:
-            indices = np.concat([
-                indices,
-                self.rng.choice(
-                    indices,
-                    size=self.batch_size - (n_samples % self.batch_size),
-                    replace=False
-                )
-            ])
         if self.shuffle:
             self.rng.shuffle(indices)
         indices = jnp.array(indices).reshape((-1, self.batch_size))
+        if self.trainer is not None:
+            indices = self.trainer.shard_model(indices)
 
-        def foo(
-            carry: Tuple[
-                eqx.Module, eqx.nn.State, Any, PRNGKeyArray
-            ],
-            idx: Int[Array, "bs"]
-        ) -> Tuple[
-            Tuple[eqx.Module, eqx.nn.State, Any, PRNGKeyArray],
-            Float[Array, "1"]
-        ]:
-            model, state, opt_state, key = carry
-            key, subkey = jax.random.split(key)
-            model, state, opt_state, output = step_fn(
-                model, state, opt_state,
-                self.cards, self.drafts[idx], subkey
-            )
-            return (model, state, opt_state, key), output
-
-        (model, state, opt_state, key), outputs = jax.lax.scan(
-            foo,
-            (model, state, opt_state, key),
-            indices
+        (params, state, opt_state, _, key), outputs = self.scan_fn(
+            init=(params, state, opt_state, lr_transform_state, key),
+            xs=indices
         )
-        return model, state, opt_state, key, outputs
+        self.compiled = True
+        return params, state, opt_state, key, outputs
 
 def train_test_split(df, test_size=0.2, seed=0):
     return df.with_columns(
