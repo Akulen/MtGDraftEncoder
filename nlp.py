@@ -5,7 +5,7 @@ import re
 import numpy as np
 import polars as pl
 import torch
-from typing import List
+from typing import List, Optional
 from jaxtyping import ArrayLike, Real
 from huggingface_hub import login
 from sentence_transformers import SentenceTransformer
@@ -15,7 +15,9 @@ with open('tokens.json', 'r') as f:
 
 class NLPProcessor(ABC):
     @abstractmethod
-    def __call__(self, x: List[str]) -> Real[ArrayLike, "n d"]:
+    def __call__(
+        self, x: List[str], prompt: Optional[str]=None
+    ) -> Real[ArrayLike, "n d"]:
         pass
 
     def __str__(self):
@@ -57,7 +59,9 @@ class SimpleTokenizer(NLPProcessor):
     def vocab_size(self):
         return len(self.vocab)
 
-    def __call__(self, text: List[str]) -> Real[ArrayLike, "n d"]:
+    def __call__(
+        self, text: List[str], _: Optional[str]=None
+    ) -> Real[ArrayLike, "n d"]:
         # assert(torch.iinfo(dtype).max >= max(self.vocab.values()))
         tokens = self.tokenize(text)
         return np.array(
@@ -80,5 +84,9 @@ class Gemma(NLPProcessor):
             model_id, truncate_dim=d_encoder, device=device
         ).to(device=device)
 
-    def __call__(self, x: List[str]) -> Real[ArrayLike, "n d"]:
-        return self.model.encode(x)
+    def __call__(
+        self, x: List[str], prompt: Optional[str]=None
+    ) -> Real[ArrayLike, "n d"]:
+        if prompt is None:
+            return self.model.encode(x)
+        return self.model.encode(x, prompt=prompt)
