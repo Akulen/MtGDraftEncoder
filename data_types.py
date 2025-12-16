@@ -8,20 +8,24 @@ class BatchedData(eqx.Module):
         return jax.tree.map(lambda x: x[idx], self)
 
 
-@jaxtyped(typechecker=typechecker)
 class Cards(BatchedData):
-    card_id: Int[Array, "n"]
-    textual_features: Real[Array, "n d_t"]
-    numeric_features: Float[Array, "n d_n"]
+    card_id: Int[Array, "n_cards"]
+    textual_features: Real[Array, "n_cards d_t"]
+    numeric_features: Float[Array, "n_cards d_n"]
 
-@jaxtyped(typechecker=typechecker)
+class Sets(BatchedData):
+    card_ids: Int[Array, "n_sets set_size_max"]
+    set_size: Int[Array, "n_sets"]
+    pack_size: Int[Array, "n_sets"]
+    graph: Int[Array, "n_sets 2 n_nodes"]
+
 class Drafts(BatchedData):
-    set_id: Int[Array, "n"]
-    packs: Int[Array, "n 45 15"] # TODO: A factor of 2 can be gained here
-    picks: Int[Array, "n 45"]
-    win_rate: Float[Array, "n"]
-    player_wr: Float[Array, "n"]
-    weight: Int[Array, "n"]
+    set_id: Int[Array, "n_drafts"]
+    packs: Int[Array, "n_drafts 45 15"] # TODO: A factor of 2 can be gained here
+    picks: Int[Array, "n_drafts 45"]
+    game_outcome: Int[Array, "n_drafts 2"]
+    player_wr: Float[Array, "n_drafts"]
+    weight: Int[Array, "n_drafts"]
 
 # Deprecated
 # class TextGraph(NamedTuple):

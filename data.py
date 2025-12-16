@@ -6,26 +6,29 @@ if __name__ == "__main__":
     print(f"XLA_PYTHON_CLIENT_ALLOCATOR set to: {os.environ.get('XLA_PYTHON_CLIENT_ALLOCATOR')}")
     print(f"CUDA_VISIBLE_DEVICES set to: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
 
+import argparse
 from functools import cache, partial
+import hashlib
 import datetime
 import humanfriendly
 import json
 import numpy as np
 import pickle
 import polars as pl
+import torch
 from torch.utils.data import Dataset
 from typing import Any, Callable, List, Tuple
 import jax
 import jax.numpy as jnp
 from beartype import beartype as typechecker
-from jaxtyping import jaxtyped, Array, Float, Int, PRNGKeyArray
-from typing import Mapping
+from jaxtyping import jaxtyped, Array, ArrayLike, Float, Int, PRNGKeyArray
+from typing import Literal, Mapping, Optional
 import equinox as eqx
 
 import time
 
 from models import DraftWRPredictor
-from nlp import NLPProcessor
+from nlp import Gemma, NLPProcessor
 from data_types import Cards, Sets, Drafts
 from card_utils import (
     get_all_cards, make_oracle, fix_split_names, get_draft_data, get_card_stats
@@ -124,6 +127,9 @@ class DL17Lands(Dataset):
 
         df_cards = get_card_stats(df_cards, stlands, include_ext)
 
+        df_cards = df_cards.sort(by="id")
+        df_drafts = df_drafts.sort(by="draft_id")
+
         return df_cards, df_drafts
 
 
@@ -186,21 +192,23 @@ def collate_drafts(
             pl.col('pick_id'),
             pl.col('pack')
               .alias('packs_ids'),
-            (pl.col('event_match_wins').max() / (
-                  pl.col('event_match_wins').max()
-                + pl.col('event_match_losses').max()
-            )).alias('win_rate'),
+            pl.col('event_match_wins').max(),
+            pl.col('event_match_losses').max(),
             pl.col('user_game_win_rate_bucket').mean()
               .alias('player_win_rate'),
             pl.col('user_n_games_bucket').max()
               .alias('weight'),
         )
-        .filter(pl.col('win_rate').is_not_nan())
+        # .filter(pl.col('win_rate').is_not_nan())
         .with_columns(
             pl.col('pick_id').list.to_array(n_picks),
             pl.col('packs_ids').list.to_array(n_picks),
         )
     )
+    n_incomplete = drafts.filter(
+        (pl.col('event_match_wins') < 7) & (pl.col('event_match_losses') < 3)
+    ).select(pl.len()).collect().item()
+    assert(n_incomplete == 0)
     if first_n > 0:
         drafts = drafts.head(n=first_n)
     drafts = drafts.collect()
@@ -224,23 +232,33 @@ def collate_drafts(
             ((0, 0), (0, 45 - n_picks)),
             constant_values=pad_id
         )),
-        win_rate=jnp.array(drafts['win_rate'].to_numpy()),
+        game_outcome=jnp.stack((
+            drafts['event_match_wins'].to_numpy(),
+            drafts['event_match_losses'].to_numpy()
+        ), axis=1),
+        # win_rate=jnp.array(drafts['win_rate'].to_numpy()),
         player_wr=jnp.array(drafts['player_win_rate'].to_numpy()),
         weight=jnp.array(drafts['weight'].to_numpy()),
     )
     pickle.dump(drafts, open(f'cache/{cache}.pickle', 'wb'))
     return drafts
 
-def collate_cards(dt: DL17Lands, nlp_processor: NLPProcessor) -> Cards:
+def collate_cards(
+    dt: DL17Lands, nlp_processor: NLPProcessor, use_meta: bool=False,
+    prompt: Optional[str]=None
+) -> Cards:
+    card_ids = jnp.array(dt.cards['id'].to_numpy())
     return Cards(
-        card_id=jnp.array(dt.cards['id'].to_numpy()),
-        textual_features=jnp.array(nlp_processor(dt.cards['oracle'].to_list())),
+        card_id=card_ids,
+        textual_features=jnp.array(nlp_processor(
+            dt.cards['oracle'].to_list(), prompt=prompt
+        )),
         numeric_features=jnp.transpose(jnp.array([
             dt.cards[category]
             for category in [
                 'opening_hand', 'drawn', 'tutored', 'deck', 'sideboard', 'GIH'
             ]
-        ])),
+        ])) if use_meta else jnp.zeros((card_ids.shape[0], 0))
     )
 
 def make_reverse_dict(l: Int[Array, "n"], offset=0) -> Int[Array, "m"]:
@@ -250,6 +268,36 @@ def make_reverse_dict(l: Int[Array, "n"], offset=0) -> Int[Array, "m"]:
     d[l] = offset + np.arange(l.shape[0])
     return jnp.array(d)
 
+def make_graph_knn(
+    sims: Float[Array, "n n"], density: float=0.2
+) -> Int[Array, "2 m"]:
+    n = sims.shape[0]
+    k = int((n-1) * density)
+    U = []
+    V = []
+    for u in range(n):
+        U.extend([u] * (k+1))
+        V.extend(np.argsort(sims[u])[-k-1:])
+    return jnp.stack([jnp.array(U), jnp.array(V)])
+
+def make_graph_global(
+    sims: Float[Array, "n n"], density: float=0.2
+) -> Int[Array, "2 m"]:
+    n = sims.shape[0]
+    values = sims.flatten()
+    values.sort()
+    values = values[:-n]
+    limit = values[-int(len(values)*density)]
+    adj_matrix = sims > limit
+    return jnp.argwhere(adj_matrix).T
+
+def make_graph(
+    sims: Float[Array, "n n"], density: float=0.1, local: bool=False
+) -> Int[Array, "2 m"]:
+    if local:
+        return make_graph_knn(sims, density)
+    return make_graph_global(sims, density)
+
 class JaxDraftDataset:
     def __init__(
         self,
@@ -257,6 +305,9 @@ class JaxDraftDataset:
         nlp_processor: NLPProcessor,
         time_offset: int=0,
         time_window: int=7,
+        use_meta: bool=False,
+        graph_density: float=0.1,
+        graph_type: Literal['knn', 'global']='knn',
         pad_id: int=0,
         batch_size: int=32,
         shuffle: bool=True,
@@ -272,12 +323,24 @@ class JaxDraftDataset:
         offset = 1
         for i, dl in enumerate(dataloaders):
             st = time.time()
-            cards.append(collate_cards(dl, nlp_processor))
+            cards.append(collate_cards(
+                dl, nlp_processor, use_meta,
+                prompt="task: Magic the Gathering card selection in a draft | card: "
+            ))
             id_map = make_reverse_dict(cards[-1].card_id, offset)
+            graph = jnp.zeros((1, 2, 0), jnp.int32)
+            if isinstance(nlp_processor, Gemma):
+                h = torch.from_numpy(np.array(cards[-1].textual_features))
+                graph = make_graph(
+                    nlp_processor.model.similarity(h, h).numpy(), #type: ignore
+                    density=graph_density,
+                    local=graph_type=='knn'
+                ) + offset
             sets.append(Sets(
                 card_ids=id_map[cards[-1].card_id],
                 set_size=cards[-1].card_id.shape[0],
-                pack_size=dl.pack_size
+                pack_size=dl.pack_size,
+                graph=graph
             ))
             cur_drafts = collate_drafts(
                 i, dl, time_offset=time_offset, time_window=time_window,
@@ -305,6 +368,7 @@ class JaxDraftDataset:
             numeric_features=jnp.zeros((1, d_n), dtype=jnp.float32)
         ))
         max_set_size = max(s.set_size for s in sets)
+        max_graph_size = max(s.graph.shape[1] for s in sets)
         for i in range(len(sets)):
             sets[i] = eqx.tree_at(
                 lambda s: s.card_ids,
@@ -312,6 +376,15 @@ class JaxDraftDataset:
                 jnp.pad(
                     sets[i].card_ids,
                     ((0, max_set_size - sets[i].set_size),),
+                    constant_values=pad_id
+                )
+            )
+            sets[i] = eqx.tree_at(
+                lambda s: s.graph,
+                sets[i],
+                jnp.pad(
+                    sets[i].graph,
+                    ((0, 0), (0, max_graph_size - sets[i].graph.shape[1])),
                     constant_values=pad_id
                 )
             )
@@ -344,13 +417,15 @@ class JaxDraftDataset:
                 self.drafts
             )
 
+        self.card_bytes = sum(
+            jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.cards))
+        )
+        self.draft_bytes = sum(
+            jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.drafts))
+        )
         if verbose:
-            print(f'Cards use:  {humanfriendly.format_size(sum(
-                jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.cards))
-            )):>9}')
-            print(f'Drafts use: {humanfriendly.format_size(sum(
-                jax.tree.leaves(jax.tree.map(lambda d: d.nbytes, self.drafts))
-            )):>9}')
+            print(f'Cards use:  {humanfriendly.format_size(self.card_bytes):>9}')
+            print(f'Drafts use: {humanfriendly.format_size(self.draft_bytes):>9}')
 
         self.shuffle = shuffle
         self.step_fn = None
@@ -360,12 +435,14 @@ class JaxDraftDataset:
     def n_steps(self) -> int:
         return self.drafts.picks.shape[0] // self.batch_size
 
-    def shard_data(self, trainer: Trainer):
-        self.trainer = trainer
-        self.cards, self.sets = trainer.shard_model(
-            self.cards, self.sets
-        )
-        self.drafts = trainer.shard_data(self.drafts)
+    def shard_data(self, trainer: Optional[Trainer]=None):
+        if trainer is not None:
+            self.trainer = trainer
+        if self.trainer is not None:
+            self.cards, self.sets = self.trainer.shard_model(
+                self.cards, self.sets
+            )
+            # self.drafts = trainer.shard_data(self.drafts)
 
     def set_step_function(self,
         static: DraftWRPredictor,
@@ -374,32 +451,33 @@ class JaxDraftDataset:
                 DraftWRPredictor, eqx.nn.State, Any, Any,
                 Cards, Sets, Drafts, PRNGKeyArray
             ],
-            Tuple[DraftWRPredictor, eqx.nn.State, Any, Float[Array, ""]]
+            Tuple[DraftWRPredictor, eqx.nn.State, Any, Float[Array, "..."]]
         ]
     ):
         def foo(
             carry: Tuple[
-                DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray
+                DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray, Cards, Sets
             ],
-            idx: Int[Array, "bs"],
+            batch: Drafts,
             static: DraftWRPredictor,
-            cards: Cards, sets: Sets, drafts: Drafts
         ) -> Tuple[
-            Tuple[DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray],
-            Float[Array, "1"]
+            Tuple[DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray, Cards, Sets],
+            Float[Array, "..."]
         ]:
-            params, state, opt_state, lr_transform_state, key = carry
+            params, state, opt_state, lr_transform_state, key, cards, sets = carry
             model = eqx.combine(params, static)
             key, subkey = jax.random.split(key)
             model, state, opt_state, output = step_fn(
                 model, state, opt_state, lr_transform_state,
-                cards, sets, drafts[idx], subkey
+                cards, sets, batch, subkey
             )
             params, _ = eqx.partition(model, eqx.is_array)
-            return (params, state, opt_state, lr_transform_state, key), output
-        self.step_fn = partial(
-            foo, static=static,
-            cards=self.cards, sets=self.sets, drafts=self.drafts
+            return (params, state, opt_state, lr_transform_state, key, cards, sets), output
+        self.step_fn = jax.jit(
+            partial(
+                foo, static=static,
+            ),
+            donate_argnums=(0, 1)
         )
         self.scan_fn = partial(jax.lax.scan, f=self.step_fn)
         self.compiled = False
@@ -418,12 +496,17 @@ class JaxDraftDataset:
             jnp.arange(self.drafts.picks.shape[0])
                .reshape((-1, self.batch_size))
         )
+        drafts = self.drafts[indices]
         if self.trainer is not None:
-            indices = self.trainer.shard_model(indices)
+            drafts = self.trainer.shard_data(drafts)
         self.scan_fn = jax.jit(self.scan_fn).trace( #type: ignore
-            init=(params, state, opt_state, lr_transform_state, key),
-            xs=indices
+            init=(params, state, opt_state, lr_transform_state, key, self.cards, self.sets),
+            xs=drafts
         ).lower().compile()
+        with open('tmp_hlo.txt', 'w') as f:
+            for module in self.scan_fn.runtime_executable().hlo_modules():
+                f.write(module.to_string())
+        # assert False
         self.compiled = True
 
     @jaxtyped(typechecker=typechecker)
@@ -435,8 +518,8 @@ class JaxDraftDataset:
         lr_transform_state: Any,
         key: PRNGKeyArray
     ) -> Tuple[
-        DraftWRPredictor, eqx.nn.State, Any, PRNGKeyArray,
-        Float[Array, "n_batches"]
+        DraftWRPredictor, eqx.nn.State, Any, Any, PRNGKeyArray,
+        Float[Array, "n_batches ..."]
     ]:
         if self.step_fn is None:
             raise ValueError("step_fn is not set")
@@ -446,15 +529,191 @@ class JaxDraftDataset:
         if self.shuffle:
             self.rng.shuffle(indices)
         indices = jnp.array(indices).reshape((-1, self.batch_size))
-        if self.trainer is not None:
-            indices = self.trainer.shard_model(indices)
 
-        (params, state, opt_state, _, key), outputs = self.scan_fn(
-            init=(params, state, opt_state, lr_transform_state, key),
-            xs=indices
+        drafts = self.drafts[indices]
+        if self.trainer is not None:
+            drafts = self.trainer.shard_data(drafts)
+
+        (params, state, opt_state, lr_transform_state, key, _, _), outputs = self.scan_fn(
+            init=(params, state, opt_state, lr_transform_state, key, self.cards, self.sets),
+            xs=drafts
         )
         self.compiled = True
-        return params, state, opt_state, key, outputs
+        return params, state, opt_state, lr_transform_state, key, outputs
+
+    def to_serializable(self):
+        def to_host(x):
+            if hasattr(x, "device_buffer") or isinstance(x, jnp.ndarray):
+                return np.array(x)
+            return x
+
+        serial = {
+            'scalar': {
+                'batch_size': self.batch_size,
+                'card_bytes': self.card_bytes,
+                'draft_bytes': self.draft_bytes,
+                'shuffle': self.shuffle,
+            },
+            'eqx_data': {
+                'cards': jax.tree.map(to_host, self.cards),
+                'drafts': jax.tree.map(to_host, self.drafts),
+                'sets': jax.tree.map(to_host, self.sets),
+            },
+            'rng': self.rng.bit_generator.state
+        }
+        return serial
+
+    @classmethod
+    def from_serialized(cls, serial):
+        """Create an instance quickly from serial (dict of numpy arrays)."""
+        obj = object.__new__(cls)
+
+        def from_host(x):
+            if hasattr(x, "device_buffer") or isinstance(x, np.ndarray):
+                return jnp.array(x)
+            return x
+
+        for k, v in serial['scalar'].items():
+            setattr(obj, k, v)
+        obj.cards = jax.tree.map(from_host, serial['eqx_data']['cards'])
+        obj.drafts = jax.tree.map(from_host, serial['eqx_data']['drafts'])
+        obj.sets = jax.tree.map(from_host, serial['eqx_data']['sets'])
+        bit_rng = np.random.PCG64()
+        bit_rng.state = serial['rng']
+        obj.rng = np.random.Generator(bit_rng)
+        obj.step_fn = None
+        obj.trainer = None
+        obj.compiled = False
+        return obj
+
+def make_dataset_from_args(args: argparse.Namespace) -> Tuple[
+    JaxDraftDataset, JaxDraftDataset, JaxDraftDataset
+]:
+    return make_datasets(
+        train_set=args.train_set,
+        val_set=args.val_set,
+        test_set=args.test_set,
+        temporal_split=args.temporal_split,
+        time_window=args.time_window,
+        use_meta=args.use_meta,
+        graph_density=args.graph_density,
+        graph_type=args.graph_type,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        encoder_name=args.encoder,
+        verbose=args.verbose
+    )
+
+def make_datasets(
+    train_set: List[str],
+    val_set: List[str],
+    test_set: List[str],
+    temporal_split: bool=False,
+    time_window: int=7,
+    use_meta: bool=False,
+    graph_density: float=0.1,
+    graph_type: Literal['knn', 'global']='knn',
+    batch_size: int=32,
+    seed: int=42,
+    encoder_name: str='gemma',
+    verbose: bool=False,
+    cache: bool=True
+) -> Tuple[
+    JaxDraftDataset, JaxDraftDataset, JaxDraftDataset
+]:
+    args = locals()
+    hs = None
+    if cache:
+        hs = hashlib.sha256(
+            json.dumps(args, sort_keys=True).encode('utf-8')
+        ).hexdigest()
+        if os.path.exists(f'cache/datasets/{hs}.pkl'):
+            with open(f'cache/datasets/{hs}.pkl', 'rb') as f:
+                _args, (data_train, data_val, data_test) = pickle.load(f)
+                if args != _args:
+                    raise ValueError('Cached arguments do not match')
+                return (
+                    JaxDraftDataset.from_serialized(data_train),
+                    JaxDraftDataset.from_serialized(data_val),
+                    JaxDraftDataset.from_serialized(data_test)
+                )
+
+    dataloaders_train = [
+        DL17Lands(ext, verbose=verbose) for ext in train_set
+    ]
+    if temporal_split:
+        dataloaders_test = dataloaders_train
+        dataloaders_val = dataloaders_train
+    else:
+        dataloaders_test = [
+            DL17Lands(ext, verbose=verbose) for ext in test_set
+        ]
+        dataloaders_val = [
+            DL17Lands(ext, verbose=verbose) for ext in val_set
+        ]
+
+    match encoder_name:
+        case 'gemma':
+            from nlp import Gemma
+            encoder = Gemma()
+        case _:
+            raise NotImplementedError(f'Unknown encoder {encoder_name}')
+
+    data_train = JaxDraftDataset(
+        dataloaders_train,
+        encoder,
+        time_offset=2*time_window if temporal_split else 0,
+        time_window=time_window,
+        use_meta=use_meta,
+        graph_density=graph_density,
+        graph_type=graph_type,
+        batch_size=batch_size,
+        shuffle=True,
+        seed=seed,
+        verbose=verbose
+    )
+    data_val = JaxDraftDataset(
+        dataloaders_val,
+        encoder,
+        time_offset=time_window if temporal_split else 0,
+        time_window=time_window,
+        use_meta=use_meta,
+        graph_density=graph_density,
+        graph_type=graph_type,
+        batch_size=batch_size,
+        shuffle=False,
+        seed=seed,
+        verbose=verbose
+    )
+    data_test = JaxDraftDataset(
+        dataloaders_test,
+        encoder,
+        time_window=time_window,
+        use_meta=use_meta,
+        graph_density=graph_density,
+        graph_type=graph_type,
+        batch_size=batch_size,
+        shuffle=False,
+        seed=seed,
+        verbose=verbose
+    )
+    # constant_bytes = sum(
+    #     d.card_bytes + d.draft_bytes
+    #     for d in [data_train, data_val, data_test]
+    # ) 
+    # jax.config.update(
+    #     "jax_captured_constants_warn_bytes", int(constant_bytes*1.01)
+    # )
+    if cache:
+        assert hs is not None
+        os.makedirs('cache/datasets', exist_ok=True)
+        with open(f'cache/datasets/{hs}.pkl', 'wb') as f:
+            pickle.dump((args, (
+                data_train.to_serializable(),
+                data_val.to_serializable(),
+                data_test.to_serializable()
+            )), f)
+    return data_train, data_val, data_test
 
 def train_test_split(df, test_size=0.2, seed=0):
     return df.with_columns(
