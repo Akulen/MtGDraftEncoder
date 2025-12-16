@@ -1,16 +1,25 @@
 import jax
+from jax._src.dtypes import dtype
+import jax.numpy as jnp
+import numpy as np
 import equinox as eqx
 import optax
 from typing import assert_never, Any, Callable, Literal, Optional, Tuple
-from jaxtyping import Array, Bool, Float, PRNGKeyArray, Real
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
 from data_types import Cards, Sets, Drafts
 from models import DraftWRPredictor
 
 Loss = Callable[
-    [Float[Array, "bs"], Real[Array, "bs"], Optional[Bool[Array, "bs"]]],
+    [Float[Array, "bs"], Float[Array, "bs"], Optional[Bool[Array, "bs"]]],
     Float[Array, ""]
 ]
+LossWR = Callable[
+    [Float[Array, "bs"], Int[Array, "bs 2"], Optional[Bool[Array, "bs"]]],
+    Float[Array, ""]
+]
+
+PICK_WEIGHT = (jnp.arange(1, 46) / 45) ** 2
 
 def MSE_loss(
     y_pred: Float[Array, "bs 45"],
@@ -18,14 +27,71 @@ def MSE_loss(
     mask: Optional[Bool[Array, "bs 45"]]=None
 ) -> Float[Array, ""]:
     if mask is None:
-        return ((y_pred - y_true.reshape((-1, 1))) ** 2).mean()
+        mask = jnp.ones_like(y_pred)
+    mask *= PICK_WEIGHT
     return ((y_pred - y_true.reshape((-1, 1))) ** 2 * mask).sum() / mask.sum()
+
+def MSE_wr_loss(
+    y_pred: Float[Array, "bs 45"],
+    y_true: Int[Array, "bs 2"],
+    mask: Optional[Bool[Array, "bs 45"]]=None
+) -> Float[Array, ""]:
+    return MSE_loss(y_pred, y_true[:,0] / y_true.sum(axis=-1), mask)
+
+pascal = np.zeros((9, 7), dtype=np.int32)
+pascal[0, 0] = 1
+for i in range(1, 9):
+    pascal[i, 0] = pascal[i-1, 0]
+    for j in range(1, 7):
+        pascal[i, j] = pascal[i-1, j] + pascal[i-1, j-1]
+pascal = jnp.array(pascal)
+
+def NLL_wr_loss(
+    y_pred: Float[Array, "bs 45"],
+    y_true: Int[Array, "bs 2"],
+    mask: Optional[Bool[Array, "bs 45"]]=None,
+    eps=1e-4
+) -> Float[Array, ""]:
+    W = y_true[:,0,None]
+    L = y_true[:,1,None]
+    p = jnp.clip(y_pred, eps, 1-eps)
+    log_p_win_cap = (
+        jnp.log(pascal[6 + L, 6]) +
+        7 * jnp.log(p) +
+        L * jnp.log1p(-p)
+    )
+    log_p_loss_cap = (
+        jnp.log(pascal[W + 2, 2]) +
+        W * jnp.log(p) +
+        3 * jnp.log1p(-p)
+    )
+    biased_log_p = jnp.where(
+        (y_true[:,0] == 7).reshape((-1, 1)),
+        log_p_win_cap,
+        log_p_loss_cap
+        #   pascal[6+y_true[:,1], 6].reshape((-1, 1))
+        # * y_pred**7 * (1-y_pred)**y_true[:,1].reshape((-1, 1)), # 7 Wins
+        #   pascal[2+y_true[:,0], 2].reshape((-1, 1))
+        # * (1-y_pred)**3 * y_pred**y_true[:,0].reshape((-1, 1)) # 3 Losses
+    )
+    if mask is None:
+        mask = jnp.ones_like(y_pred)
+    mask *= PICK_WEIGHT
+    return -(biased_log_p * mask).sum() / mask.sum()
+
+LOSSES = {
+    'MSE': MSE_loss,
+}
+LOSSES_WR = {
+    'MSE': MSE_wr_loss,
+    'NLL': NLL_wr_loss
+}
 
 class Trainer:
     def __init__(
         self,
         tx: optax.GradientTransformation,
-        loss: Loss | Literal['MSE']=MSE_loss,
+        loss: Loss | LossWR | Literal['MSE']=MSE_loss,
         target: Literal['wr', 'pwr']='wr',
         n_devices: Optional[int]=None
     ):
@@ -36,20 +102,21 @@ class Trainer:
             self.mesh, jax.sharding.PartitionSpec()
         )
         self.data_sharding = jax.sharding.NamedSharding(
-            self.mesh, jax.sharding.PartitionSpec("batch")
+            self.mesh, jax.sharding.PartitionSpec(None, "batch")
         )
         self.compute_loss_grad = eqx.filter_value_and_grad(
             self.compute_loss, has_aux=True
         )
         self.tx = tx
         if isinstance(loss, str):
-            if loss == 'MSE':
-                loss = MSE_loss
+            L = LOSSES_WR if target == 'wr' else LOSSES
+            if loss in L:
+                loss = L[loss]
             else:
-                raise NotImplementedError
+                raise NotImplementedError(f'Loss {loss} not implemented for target {target}')
         if target == 'wr':
             self.loss = lambda y, drafts, mask=None: loss(
-                y, drafts.win_rate, mask
+                y, drafts.game_outcome, mask
             )
         elif target == 'pwr':
             self.loss = lambda y, drafts, mask=None: loss(
@@ -103,7 +170,6 @@ class Trainer:
         model, state, opt_state, cards = self.shard_model(
             model, state, opt_state, cards
         )
-        drafts = self.shard_data(drafts)
         (loss, state), grads = self.compute_loss_grad(
             model, state, cards, sets, drafts, key
         )
@@ -134,7 +200,6 @@ class Trainer:
         model, state, opt_state, cards = self.shard_model(
             model, state, opt_state, cards
         )
-        drafts = self.shard_data(drafts)
         loss, state = self.compute_loss(
             model, state, cards, sets, drafts, key, inference=True
         )
