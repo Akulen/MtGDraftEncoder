@@ -21,6 +21,9 @@ group_meta.add_argument('--mark-lines',
 group_meta.add_argument('--plot-lr',
     type=bool, default=True, action=argparse.BooleanOptionalAction
 )
+group_meta.add_argument('--skip-batch',
+    type=bool, default=False, action=argparse.BooleanOptionalAction
+)
 args = parser.parse_args()
 
 import os
@@ -34,6 +37,8 @@ import numpy as np
 import pathlib
 import pickle
 from typing import Tuple
+import matplotlib as mpl
+mpl.rcParams['agg.path.chunksize'] = 10000
 
 config = None
 train_epoch_size = None
@@ -61,6 +66,9 @@ def plot(data, ax_batch, ax_epoch, label=None):
 
     global config, train_epoch_size
     config = data['config']
+    # if config.model_params['n_set_layers'] + config.model_params['n_layers'] < 15:
+    #     return []
+    # print(config.model_params['n_set_layers'], config.model_params['n_layers'], config.param_count)
 
     local_train_epoch_size = data['train_losses'].shape[0] // config.epochs
     assert(train_epoch_size is None or train_epoch_size == local_train_epoch_size)
@@ -122,14 +130,16 @@ def main(args: argparse.Namespace):
     ax_batch.set_title(f'{config.name} Batch Losses')
     ax_epoch.set_title(f'{config.name} Losses')
 
-    ax_batch.plot([], [], color='gray', label='Train Loss')
-    ax_batch.plot([], [], color='gray', linewidth='0.75', label='Validation Loss')
-    ax_batch.plot([], [], linestyle='dashdot', linewidth='1', color='gray', label='Test Loss')
+    if not args.skip_batch:
+        ax_batch.plot([], [], color='gray', label='Train Loss')
+        ax_batch.plot([], [], color='gray', linewidth='0.75', label='Validation Loss')
+        ax_batch.plot([], [], linestyle='dashdot', linewidth='1', color='gray', label='Test Loss')
     ax_epoch.plot([], [], color='gray', label='Train Loss')
     ax_epoch.plot([], [], color='gray', linewidth='0.75', label='Validation Loss')
     ax_epoch.plot([], [], linestyle='dashdot', linewidth='1', color='gray', label='Test Loss')
     if args.plot_lr:
-        ax_batch.plot([], [], linestyle=':', linewidth='0.5', color='gray', label='Learning Rate')
+        if not args.skip_batch:
+            ax_batch.plot([], [], linestyle=':', linewidth='0.5', color='gray', label='Learning Rate')
         ax_epoch.plot([], [], linestyle=':', linewidth='0.5', color='gray', label='Learning Rate')
 
     longest_model_name = 0
@@ -144,6 +154,10 @@ def main(args: argparse.Namespace):
             field_lengths[k] = max(field_lengths[k], len(str_field(k, v)))
             field_values[k].add(v)
 
+    batch_y_min = np.inf
+    batch_y_max = -np.inf
+    epoch_y_min = np.inf
+    epoch_y_max = -np.inf
     for i, (
         (model_name, params),
         (batch_x_train, batch_y_train),
@@ -153,6 +167,26 @@ def main(args: argparse.Namespace):
         (epoch_x_test, epoch_y_test),
         lr
     ) in enumerate(lines):
+        batch_y_min = min(batch_y_min,
+            np.min(batch_y_train),
+            np.min(batch_y_val),
+            np.min(batch_y_test)
+        )
+        batch_y_max = max(batch_y_max,
+            np.max(batch_y_train),
+            np.max(batch_y_val),
+            np.max(batch_y_test)
+        )
+        epoch_y_min = min(epoch_y_min,
+            np.min(epoch_y_train),
+            np.min(epoch_y_val),
+            np.min(epoch_y_test)
+        )
+        epoch_y_max = max(epoch_y_max,
+            np.max(epoch_y_train),
+            np.max(epoch_y_val),
+            np.max(epoch_y_test)
+        )
         label_params = ''
         param_cnt = 0
         if len(field_values) > 0:
@@ -173,9 +207,10 @@ def main(args: argparse.Namespace):
         label = f'{model_name:<{longest_model_name}}'
         if param_cnt > 0:
             label += f'[{label_params}]'
-        ax_batch.plot(1+batch_x_train, batch_y_train, label=label, color=cmap(i))
-        ax_batch.plot(1+batch_x_val, batch_y_val, linewidth='0.75', color=cmap(i))
-        ax_batch.plot(1+batch_x_test, batch_y_test, linestyle='dashdot', linewidth='1', color=cmap(i))
+        if not args.skip_batch:
+            ax_batch.plot(1+batch_x_train, batch_y_train, label=label, color=cmap(i))
+            ax_batch.plot(1+batch_x_val, batch_y_val, linewidth='0.75', color=cmap(i))
+            ax_batch.plot(1+batch_x_test, batch_y_test, linestyle='dashdot', linewidth='1', color=cmap(i))
         ax_epoch.plot(1+epoch_x_train, epoch_y_train, label=label, color=cmap(i))
         ax_epoch.plot(1+epoch_x_train, epoch_y_val, linewidth='0.75', color=cmap(i))
         ax_epoch.plot(1+epoch_x_test, epoch_y_test, linestyle='dashdot', linewidth='1', color=cmap(i))
@@ -186,7 +221,10 @@ def main(args: argparse.Namespace):
                 [0],
                 1+epoch_x_train
             ])
-            ax_batch_lr.plot(X_val*train_epoch_size, lr, linestyle=':', linewidth=0.5, color=cmap(i))
+            if len(lr) < len(X_val):
+                lr = np.concat([lr, [lr[-1]]*(len(X_val)-len(lr))])
+            if not args.skip_batch:
+                    ax_batch_lr.plot(X_val*train_epoch_size, lr, linestyle=':', linewidth=0.5, color=cmap(i))
             ax_epoch_lr.plot(X_val, lr, linestyle=':', linewidth=0.5, color=cmap(i))
 
     ax_batch.set_xlim(1, config.epochs*train_epoch_size)
@@ -218,15 +256,20 @@ def main(args: argparse.Namespace):
                 ax.axhline(y_pos, color='0.85', linestyle='--', linewidth=0.5)
 
     if args.y_max is not None:
-        ax_batch.set_ylim(top=args.y_max)
-        ax_epoch.set_ylim(top=args.y_max)
+        batch_y_max = args.y_max
+        epoch_y_max = args.y_max
     if args.y_min is not None:
-        ax_batch.set_ylim(bottom=args.y_min)
-        ax_epoch.set_ylim(bottom=args.y_min)
+        batch_y_min = args.y_min
+        epoch_y_min = args.y_min
+    ax_batch.set_ylim(top=batch_y_max)
+    ax_batch.set_ylim(bottom=batch_y_min)
+    ax_epoch.set_ylim(top=epoch_y_max)
+    ax_epoch.set_ylim(bottom=epoch_y_min)
 
     ax_batch.legend()
     ax_epoch.legend()
-    fig_batch.savefig(path.parent / 'losses_batch.png', dpi=args.dpi)
+    if not args.skip_batch:
+        fig_batch.savefig(path.parent / 'losses_batch.png', dpi=args.dpi)
     fig_epoch.savefig(path.parent / 'losses_epoch.png', dpi=args.dpi)
 
 
