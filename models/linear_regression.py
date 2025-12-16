@@ -44,8 +44,8 @@ class LinearRegression(DraftWRPredictor):
                 cards.numeric_features[picked_cards]
             ], axis=1)
         )
-        x = [
+        x = jnp.stack([
             self.linear[i-1](picked_data[:i].reshape((-1))).squeeze()
             for i in range(1, 46)
-        ]
-        return jnp.stack(x), state
+        ])
+        return jax.nn.sigmoid(x), state
