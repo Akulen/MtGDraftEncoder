@@ -1,0 +1,55 @@
+name: BaseDraftTransformer
+train_set:
+  - BLB
+  - FDN
+  - TDM
+temporal_split: true
+time_window: 14
+use_meta: false
+model: DraftTransformer
+model_params:
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_set_layers: 5
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_set_layers: 10
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_layers: 3
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_set_layers: 5
+    n_layers: 3
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_set_layers: 10
+    n_layers: 3
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_layers: 10
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_set_layers: 5
+    n_layers: 10
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 1e-4
+    n_set_layers: 10
+    n_layers: 10
+epochs: 500
+batch_size: 256
+loss: NLL
+optimizer: adamw
+scheduler_params:
+  patience: 50

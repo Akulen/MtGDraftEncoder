@@ -1,4 +1,4 @@
-name: Scale1DraftGraph
+name: Speed
 train_set:
   - MOM
   - WOE
@@ -15,23 +15,23 @@ val_set:
   # - ONE # /!\ Only 3 weeks of data /!\
 test_set:
   - FDN
-time_window: 42
-use_meta:
-  - true
-  - false
+time_window: 10
+# use_meta:
+#   - true
+#   - false
 model:
   - DraftGraph
-  - LinearRegression
+  # - LinearRegression
 model_params:
   - d_model: 64
     dropout_p: 0.3
     lr: 3e-5
     scheduler_params:
       patience: 20
-  - lr: 3e-5
-    scheduler_params:
-      cooldown: 0
-epochs: 200
+  # - lr: 3e-5
+  #   scheduler_params:
+  #     cooldown: 0
+epochs: 5
 optimizer: adamw
 loss: NLL
 batch_size: 256

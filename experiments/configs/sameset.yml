@@ -1,4 +1,4 @@
-name: BaseDraftGraph
+name: SameSet
 train_set:
   - BLB
   - FDN
@@ -6,16 +6,25 @@ train_set:
 temporal_split: true
 time_window: 14
 use_meta: false
-loss: NLL
-model: DraftGraph
+model:
+  - DraftTransformer
+  - DraftAttention
+  - LinearRegression
 model_params:
   - d_model: 64
     dropout_p: 0.3
     lr: 1e-4
     n_set_layers: 10
     n_layers: 5
+  - d_model: 64
+    dropout_p: 0.3
+    lr: 3e-5
+  - lr: 3e-5
+    scheduler_params:
+      cooldown: 0
 epochs: 500
 batch_size: 256
+loss: NLL
 optimizer: adamw
 scheduler_params:
   patience: 50

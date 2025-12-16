@@ -1,8 +1,8 @@
-name: SmallDraftGraph
+name: Smallish
 train_set:
   - ONE
 temporal_split: true
-time_window: 2
+time_window: 7
 model:
   - DraftGraph
   - DraftGraph
@@ -13,7 +13,6 @@ model_params:
     dropout_p: 0.1
 epochs: 10
 batch_size: 1024
-lr: 1e-4
+lr: 3e-5
 scheduler_params:
   patience: 2
-loss: MSE
