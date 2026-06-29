@@ -1,0 +1,73 @@
+name: NewSet
+train_set:
+  - MOM
+  - WOE
+  - LCI
+  - MKM
+  - OTJ
+  - BLB
+  - DSK
+  - DFT
+  - TDM
+  - FIN
+  - EOE
+val_set: train
+  # - ONE # /!\ Only 3 weeks of data /!\
+test_set:
+  - FDN
+fine_tune:
+  - 1
+#   - 3
+  - 5
+#   - 7
+fine_tune_epochs: 50
+time_window: 14 # 42
+use_meta: false
+lr: 1e-4
+models:
+  - model: Constant
+    model_params:
+      dataset: train
+  - model: Constant
+    model_params:
+      dataset: test
+  - model: DraftTransformer2
+    use_meta: true
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  # - model: DraftGraph
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.5
+  #     # use_graph_v2: true
+  #     n_set_layers: 10
+  #     n_layers: 5
+  - model: LinearRegression
+    lr: 3e-5
+  - model: LinearRegression
+    use_meta: true
+    lr: 3e-5
+epochs: 50
+test_frequency: 1
+graph_density: 0.05
+batch_size: 256
+loss: NLL
+optimizer: adamw
+scheduler: warmup_cosine
+scheduler_params:
+  init_mult: 1e-1
+  warmup_steps: 5
+  end_mult: 1e-2
+seed:
+  - 42
+  - 4242
+  - 424242

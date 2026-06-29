@@ -1,0 +1,56 @@
+name: SpeedTest
+train_set:
+  - BLB
+  - FDN
+  - TDM
+  # - MOM
+  # - WOE
+  # - LCI
+  # - MKM
+  # - OTJ
+  # - BLB
+  # - DSK
+  # - DFT
+  # - TDM
+  # - FIN
+temporal_split: true
+time_window: 14
+use_meta: false
+lr: 1e-4
+models:
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 5
+      n_layers: 5
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 5
+      n_layers: 10
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 10
+epochs: 50
+graph_density: 0.01
+batch_size: 256
+loss: NLL
+optimizer: adamw
+scheduler: warmup_cosine
+scheduler_params:
+  init_mult: 1e-1
+  warmup_steps: 5
+  end_mult: 1e-1
+  n_restarts: 0
+  restart_factor: 1

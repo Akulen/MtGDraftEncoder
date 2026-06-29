@@ -1,0 +1,38 @@
+name: bertram
+train_set:
+  - NEO
+temporal_split: true
+time_window: 10
+use_meta: false
+lr: 1e-4
+models:
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: DraftTransformer2
+    use_meta: true
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: LinearRegression
+    lr: 3e-5
+epochs: 100
+test_frequency: 1
+loss:
+  - NLL
+  - KL
+optimizer: adamw
+scheduler: warmup_cosine
+scheduler_params:
+  init_mult: 1e-1
+  warmup_steps: 5
+  end_mult: 1e-1
+seed:
+  - 42
+  - 4242
+  - 424242

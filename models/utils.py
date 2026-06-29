@@ -1,13 +1,15 @@
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-from typing import Callable, Optional
-from jaxtyping import Float, Array, Bool, PRNGKeyArray
+from typing import Callable, List, Tuple
+from jaxtyping import Float, Array, PRNGKeyArray
 
+from models._types import ResidualLayer
 from data_types import Cards, Sets, Drafts
 import utils
 
 class CardPreProcess(eqx.Module):
+    use_meta: bool=eqx.field(static=True)
     reduce: eqx.nn.Linear
     dropout: eqx.nn.Dropout
 
@@ -15,12 +17,16 @@ class CardPreProcess(eqx.Module):
         self,
         key: PRNGKeyArray,
         cards: Cards,
+        use_meta: bool,
         d_model: int=64,
         dropout_p: float=0.1
     ):
+        self.use_meta = use_meta
+        n_features = cards.textual_features.shape[1]
+        if use_meta:
+            n_features += cards.numeric_features.shape[1]
         self.reduce = eqx.nn.Linear(
-            in_features=cards.textual_features.shape[1]
-                      + cards.numeric_features.shape[1],
+            in_features=n_features,
             out_features=d_model,
             key=key
         )
@@ -34,61 +40,100 @@ class CardPreProcess(eqx.Module):
         drafts: Drafts,
         inference: bool=False
     ) -> Float[Array, "set_size_max d_model"]:
+        features = [cards.textual_features]
+        if self.use_meta:
+            features.append(cards.numeric_features)
         card_features = jnp.concat([
-            jax.vmap(utils.layer_norm)(cards.textual_features),
-            jax.vmap(utils.layer_norm)(cards.numeric_features)
+            jax.vmap(utils.layer_norm)(feature)
+            for feature in features
         ], axis=-1)
         set_cards = sets.card_ids[drafts.set_id]
         h_cards_0 = card_features[set_cards]
         h_cards_0 = jax.vmap(self.reduce)(h_cards_0)
-        h_cards_0 = jax.nn.leaky_relu(h_cards_0)
+        h_cards_0 = jax.nn.gelu(h_cards_0) # jax.nn.leaky_relu(h_cards_0)
         h_cards_0 = self.dropout(h_cards_0, inference=inference, key=key)
         return h_cards_0
 
-class AttentionUpdater(eqx.Module):
-    attention: eqx.nn.MultiheadAttention
-    dropout: eqx.nn.Dropout
+class SetContext(eqx.Module):
+    process_cards: CardPreProcess
+    context_film: eqx.nn.MLP
+    layers: List[ResidualLayer]
 
     def __init__(
         self,
         key: PRNGKeyArray,
-        dropout_p: float=0.1,
+        cards: Cards,
+        use_meta: bool,
         d_model: int=64,
-        num_heads: int=2
+        dropout_p: float=0.1,
+        n_layers: int=3,
+        layer_fns: List[Callable]=[]
     ):
-        self.attention = eqx.nn.MultiheadAttention(
-            num_heads=num_heads,
-            query_size=d_model,
-            use_query_bias=True,
-            use_key_bias=True,
-            use_value_bias=True,
-            use_output_bias=True,
-            dropout_p=dropout_p,
-            key=key
+        key_process, key_film, key_layers = jax.random.split(key, 3)
+        self.process_cards = CardPreProcess(
+            key=key_process,
+            cards=cards,
+            use_meta=use_meta,
+            d_model=d_model,
+            dropout_p=dropout_p
         )
-        self.dropout = eqx.nn.Dropout(dropout_p)
+        self.context_film = eqx.nn.MLP(
+            in_size=d_model,
+            out_size=2 * d_model,
+            width_size=d_model,
+            depth=1,
+            activation=jax.nn.gelu, #jax.nn.relu,
+            key=key_film
+        )
+        keys = jax.random.split(key_layers, (n_layers, 1+len(layer_fns)))
+        self.layers = [
+            ResidualLayer(
+                key=layer_keys[0],
+                layers=[
+                    layer_fn(subkey)
+                    for subkey, layer_fn in zip(layer_keys[1:], layer_fns)
+                ],
+                dropout_p=dropout_p,
+                d_model=d_model,
+                ff_depth=1
+            )
+            for layer_keys in keys
+        ]
 
     def __call__(
         self,
         key: PRNGKeyArray,
-        query: Float[Array, "q_len d_model"],
-        key_: Float[Array, "kv_len d_model"],
-        value: Float[Array, "kv_len d_model"],
-        mask: Optional[Bool[Array, "q_len kv_len"]]=None,
-        process_heads: Optional[Callable]=None,
-        inference: bool=False,
-    ) -> Float[Array, "q_len d_model"]:
-        key_attention, key_dropout = jax.random.split(key)
-        update = self.attention(
-            query=query,
-            key_=key_,
-            value=value,
-            mask=mask,
-            inference=inference,
-            process_heads=process_heads,
-            key=key_attention
-        )
-        x = jax.vmap(utils.layer_norm)(query + update)
-        x = jax.nn.leaky_relu(x)
-        x = self.dropout(x, inference=inference, key=key_dropout)
-        return x
+        cards: Cards,
+        sets: Sets,
+        drafts: Drafts,
+        context: Float[Array, "d_model"],
+        state: eqx.nn.State,
+        *args,
+        inference: bool=False
+    ) -> Tuple[Float[Array, "set_size_max d_model"], eqx.nn.State]:
+        gamma, beta = jnp.split(self.context_film(context), 2, axis=-1)
+        gamma = 1.0 + 0.1 * jnp.tanh(gamma)
+
+        key, subkey = jax.random.split(key)
+        h_cards_0 = gamma * self.process_cards(
+            key=subkey,
+            cards=cards,
+            sets=sets,
+            drafts=drafts,
+            inference=inference
+        ) + beta
+
+        card_mask = jnp.arange(
+            sets.card_ids.shape[1]
+        ) < sets.set_size[drafts.set_id]
+
+        keys = jax.random.split(key, len(self.layers))
+        for subkey, layer in zip(keys, self.layers):
+            h_cards_0 = layer(
+                key,
+                h_cards_0,
+                *args,
+                inference=inference,
+                mask=jnp.outer(card_mask, card_mask)
+            )
+        return h_cards_0, state

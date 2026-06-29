@@ -154,6 +154,11 @@ def get_mana_value(mana_cost):
         .str.replace_all(r'\{B\}', '+1')
         .str.replace_all(r'\{R\}', '+1')
         .str.replace_all(r'\{G\}', '+1')
+        .str.replace_all(r'\{C/W\}', '+1')
+        .str.replace_all(r'\{C/U\}', '+1')
+        .str.replace_all(r'\{C/B\}', '+1')
+        .str.replace_all(r'\{C/R\}', '+1')
+        .str.replace_all(r'\{C/G\}', '+1')
         .str.replace_all(r'\{2/W\}', '+2')
         .str.replace_all(r'\{2/U\}', '+2')
         .str.replace_all(r'\{2/B\}', '+2')
@@ -181,42 +186,23 @@ def get_mana_value(mana_cost):
         .str.replace_all(r'^$', '0')
     ).map_elements(lambda x: str(eval(x)), return_dtype=pl.String)
 
-KEYWORDS = [
-    'Deathtouch', 'Defender', 'Double Strike', 'Enchant', 'Equip',
-    'First Strike', 'Flash', 'Flying', 'Haste', 'Hexproof', 'Indestructible',
-    'Intimidate', 'Landwalk', 'Lifelink', 'Protection', 'Reach', 'Shroud',
-    'Trample', 'Vigilance', 'Ward', 'Banding', 'Rampage', 'Cumulative Upkeep',
-    'Flanking', 'Phasing', 'Buyback', 'Shadow', 'Cycling', 'Echo',
-    'Horsemanship', 'Fading', 'Kicker', 'Flashback', 'Madness', 'Fear',
-    'Morph', 'Amplify', 'Provoke', 'Storm', 'Affinity', 'Entwine', 'Modular',
-    'Sunburst', 'Bushido', 'Soulshift', 'Splice', 'Offering', 'Ninjutsu',
-    'Epic', 'Convoke', 'Dredge', 'Transmute', 'Bloodthirst', 'Haunt',
-    'Replicate', 'Forecast', 'Graft', 'Recover', 'Ripple', 'Split Second',
-    'Suspend', 'Vanishing', 'Absorb', 'Aura Swap', 'Delve', 'Fortify',
-    'Frenzy', 'Gravestorm', 'Poisonous', 'Transfigure', 'Champion',
-    'Changeling', 'Evoke', 'Hideaway', 'Prowl', 'Reinforce', 'Conspire',
-    'Persist', 'Wither', 'Retrace', 'Devour', 'Exalted', 'Unearth', 'Cascade',
-    'Annihilator', 'Level Up', 'Rebound', 'Umbra Armor', 'Infect',
-    'Battle Cry', 'Living Weapon', 'Undying', 'Miracle', 'Soulbond',
-    'Overload', 'Scavenge', 'Unleash', 'Cipher', 'Evolve', 'Extort', 'Fuse',
-    'Bestow', 'Tribute', 'Dethrone', 'Hidden Agenda', 'Outlast', 'Prowess',
-    'Dash', 'Exploit', 'Menace', 'Renown', 'Awaken', 'Devoid', 'Ingest',
-    'Myriad', 'Surge', 'Skulk', 'Emerge', 'Escalate', 'Melee', 'Crew',
-    'Fabricate', 'Partner', 'Undaunted', 'Improvise', 'Aftermath', 'Embalm',
-    'Eternalize', 'Afflict', 'Ascend', 'Assist', 'Jump-Start', 'Mentor',
-    'Afterlife', 'Riot', 'Spectacle', 'Escape', 'Companion', 'Mutate',
-    'Encore', 'Boast', 'Foretell', 'Demonstrate', 'Daybound', 'Nightbound',
-    'Disturb', 'Decayed', 'Cleave', 'Training', 'Compleated', 'Reconfigure',
-    'Blitz', 'Casualty', 'Enlist', 'Read Ahead', 'Ravenous', 'Squad',
-    'Space Sculptor', 'Visit', 'Prototype', 'Living Metal',
-    'More Than Meets the Eye', 'For Mirrodin!', 'Toxic', 'Backup', 'Bargain',
-    'Craft', 'Disguise', 'Solved', 'Plot', 'Saddle', 'Spree', 'Freerunning',
-    'Gift', 'Offspring', 'Impending'
-]
+@cache
+def get_keywords():
+    filename = 'data/keywords.json'
+    url = "https://api.scryfall.com/catalog/keyword-abilities"
+    if not os.path.isfile(filename):
+        keywords = requests.get(url).json()['data']
+        with open(filename, 'w') as file:
+            json.dump(keywords, file)
+    else:
+        with open(filename, 'r') as file:
+            keywords = json.load(file)
+    return keywords
+
+KEYWORDS = get_keywords()
 KEYWORDS = '|'.join([re.escape(k) for k in KEYWORDS])
 KEYWORDS_REGEX = re.compile(
-    # (?mi) makes the regex case-insensitive and multi-line aware
-    r'(?mi)^\s*(?:' + KEYWORDS + r'|\s*[,;]\s*)+\s*$'
+    r'(?i)\b(?:' + KEYWORDS + r')\b'
 ).pattern
 def make_face_expr(col_fn, rarity=None) -> pl.Expr:
     expr = pl.lit('[NAME] ') + col_fn('name')
@@ -224,7 +210,7 @@ def make_face_expr(col_fn, rarity=None) -> pl.Expr:
     expr += (pl.when(mc != '')
         .then(
             pl.lit(' | [MC] ') + mc + pl.lit(' | [CMC] ') + get_mana_value(mc)
-        ) # TODO: backside of DFC should have mana value of front side
+        ) # TODO: should backside of DFC have mana value of front side?
         .otherwise(pl.lit(''))
     )
     expr += pl.lit(' | [COLOR] ') + pl.when(col_fn('colors').list.len()>0).then(
@@ -247,7 +233,7 @@ def make_face_expr(col_fn, rarity=None) -> pl.Expr:
     ).otherwise(pl.lit(''))
     keywords = (
         col_fn('oracle_text')
-        .str.replace_all(r' *\([^\)]*\) *', '')
+        .str.replace_all(r' *\([^\)]*\) *', '') # Remove reminder text
         .str.extract_all(KEYWORDS_REGEX)
     )
     expr += pl.when(keywords.list.len() > 0).then(
@@ -279,9 +265,11 @@ def full_oracle_polars(df):
     )
 
 def make_oracle(df):
-    entries = get_oracle().lazy().with_columns(
+    entries = get_oracle().lazy().filter(
+        ~pl.col('type_line').str.contains('Token')
+    ).with_columns(
         pl.col('name').str.split(' // ').list.get(0).alias('short_name'),
-    ).join(
+    ).unique(subset='name').join(
         df.lazy(),
         left_on='short_name',
         right_on='name',
@@ -325,7 +313,7 @@ def get_draft_df(ext):
         df = pl.scan_parquet(f"{filename}.parquet")
     return df
 
-def fix_split_names(df_cards, ext, verbose=False):
+def fix_split_names(df_cards, ext, verbose=0):
     df = get_draft_df(ext)
     for column in df.collect_schema().names():
         if column[:5] == 'pool_':
@@ -337,7 +325,7 @@ def fix_split_names(df_cards, ext, verbose=False):
                 print(f'{CSI}34m[{column}] {CSI}32m{name}{CSI}0m')
                 import sys
                 sys.exit()
-            if verbose:
+            if verbose > 0:
                 print(f'{CSI}34mRenaming{CSI}32m {df_cards.filter(pl.col("full_name")==name)['name'].item()}{CSI}34m to {CSI}32m{name}{CSI}0m')
             df_cards = df_cards.with_columns(
                 pl.when(pl.col('full_name') == name)
@@ -429,6 +417,7 @@ def get_draft_data(df_cards, ext, pack_size=None, pad_id=0) -> pl.LazyFrame:
 def card_stats(
     card: str, types: List[str], df_games: pl.DataFrame
 ) -> float:
+    print(df_games.columns)
     col_sum = cast(pl.Series, sum(df_games[f'{tp}_{card}'] for tp in types))
 
     return (
@@ -437,7 +426,11 @@ def card_stats(
         max(1, col_sum.sum())
     )
 
-def get_card_stats(df_cards, ext, include_ext=False) -> pl.DataFrame:
+def get_card_stats(
+    df_cards, ext, include_ext=False, data_exclude=None
+) -> pl.DataFrame:
+    if data_exclude is None:
+        data_exclude = []
     filename = f'data/game_data_public.{ext}.PremierDraft'
     stat_cols = {
         'opening_hand': ['opening_hand'],
@@ -469,9 +462,19 @@ def get_card_stats(df_cards, ext, include_ext=False) -> pl.DataFrame:
         }
         all_cards = pl.DataFrame({'name': list(all_cards)})
 
+        average_wr = df_games['won'].mean()
+        def type_exclude(types, data_exclude):
+            for tp in types:
+                if tp in data_exclude:
+                    return True
+            return False
         df_stats = all_cards.with_columns(*[
             pl.col('name').map_elements(
-                partial(card_stats, types=types, df_games=df_games),
+                (
+                    partial(card_stats, types=types, df_games=df_games)
+                    if type_exclude(types, data_exclude)
+                    else lambda c: average_wr
+                ),
                 return_dtype=pl.Float32
             ).alias(f"{ext}_{name}")
             for name, types in stat_cols.items()
@@ -524,7 +527,7 @@ def main():
             'Aquatic Alchemist',
         ],
     })
-    cards = cards.with_columns(oracle=make_oracle(cards))
+    cards = cards.with_columns(oracle=make_oracle(cards)) # type: ignore
     with pl.Config(set_fmt_str_lengths=6000):
         print(cards)
     cards = pl.DataFrame({

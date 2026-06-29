@@ -1,7 +1,6 @@
 import jax
 import equinox as eqx
-from jaxtyping import jaxtyped, Array, Int, Float, Real
-from beartype import beartype as typechecker
+from jaxtyping import Array, Bool, Int, Float, Real
 
 class BatchedData(eqx.Module):
     def __getitem__(self, idx: Int[Array, "*bs"]) -> "Drafts":
@@ -17,13 +16,15 @@ class Sets(BatchedData):
     card_ids: Int[Array, "n_sets set_size_max"]
     set_size: Int[Array, "n_sets"]
     pack_size: Int[Array, "n_sets"]
-    graph: Int[Array, "n_sets 2 n_nodes"]
+    graph: Int[Array, "n_sets 2 n_edges"]
+    adjacency: Bool[Array, "n_sets n_nodes n_nodes"]
 
 class Drafts(BatchedData):
     set_id: Int[Array, "n_drafts"]
     packs: Int[Array, "n_drafts 45 15"] # TODO: A factor of 2 can be gained here
     picks: Int[Array, "n_drafts 45"]
     game_outcome: Int[Array, "n_drafts 2"]
+    rank: Int[Array, ""]
     player_wr: Float[Array, "n_drafts"]
     weight: Int[Array, "n_drafts"]
 

@@ -3,28 +3,110 @@ train_set:
   - BLB
   - FDN
   - TDM
+  # - MOM
+  # - WOE
+  # - LCI
+  # - MKM
+  # - OTJ
+  # - BLB
+  # - DSK
+  # - DFT
+  # - TDM
+  # - FIN
 temporal_split: true
 time_window: 14
 use_meta: false
-model:
-  - DraftTransformer
-  - DraftAttention
-  - LinearRegression
-model_params:
-  - d_model: 64
-    dropout_p: 0.3
-    lr: 1e-4
-    n_set_layers: 10
-    n_layers: 5
-  - d_model: 64
-    dropout_p: 0.3
+lr: 1e-4
+models:
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: DraftTransformer2
+    use_meta: true
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  # - model: DraftTransformer
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  #     n_set_layers: 10
+  #     n_layers: 5
+  # - model: DraftTransformer
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  #     n_set_layers: 10
+  #     n_layers: 5
+  # - model: DraftAttention
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  # - model: DraftGraph
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  #     use_graph_v2: true
+  #     n_set_layers: 10
+  #     n_layers: 5
+  # - model: DraftGraph
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  #     use_graph_v2: true
+  #     n_set_layers: 10
+  #     n_layers: 5
+  - model: DraftGraph2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: DraftGraph2
+    use_meta: true
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  # - model: DraftGraph2
+  #   graph_density: 0.05
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  #     n_set_layers: 10
+  #     n_layers: 5
+  # - model: DraftGraph2
+  #   graph_density: 0.20
+  #   model_params:
+  #     d_model: 64
+  #     dropout_p: 0.3
+  #     n_set_layers: 10
+  #     n_layers: 5
+  - model: LinearRegression
     lr: 3e-5
-  - lr: 3e-5
-    scheduler_params:
-      cooldown: 0
-epochs: 500
+  - model: LinearRegression
+    use_meta: true
+    lr: 3e-5
+epochs: 100
+test_frequency: 1
+graph_density: 0.01
 batch_size: 256
 loss: NLL
 optimizer: adamw
+scheduler: warmup_cosine
 scheduler_params:
-  patience: 50
+  init_mult: 1e-1
+  warmup_steps: 1
+  end_mult: 1e-1
+  n_restarts: 0
+  restart_factor: 1
+seed:
+  - 42
+  - 4242
+  - 424242

@@ -4,3 +4,5 @@
 !.pixi/config.toml
 cache
 ckpt
+mutagen.yml*
+**/*.backup

@@ -1,4 +1,8 @@
 {
+    "NEO": {
+        "stlands": "NEO",
+        "expansions": ["NEO"],
+    },
     "ONE": {
         "stlands": "ONE",
         "expansions": ["ONE"],
@@ -8,7 +12,10 @@
             "Urabrask, Heretic Praetor",
             "Sheoldred, the Apocalypse"
         ],
-        "pack_size": 14
+        "pack_size": 14,
+        "data_exclude": [
+            "tutored"
+        ]
     },
     "MOM": {
         "stlands": "MOM",

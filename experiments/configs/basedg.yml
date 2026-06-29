@@ -11,11 +11,21 @@ model: DraftGraph
 model_params:
   - d_model: 64
     dropout_p: 0.3
-    lr: 1e-4
     n_set_layers: 10
     n_layers: 5
-epochs: 500
+    use_graph_v2: false
+    lr: 1e-4
+  - d_model: 64
+    dropout_p: 0.3
+    n_set_layers: 10
+    n_layers: 5
+    use_graph_v2: true
+epochs: 300
 batch_size: 256
 optimizer: adamw
+lr: 3e-4
+scheduler: warmup_cosine
 scheduler_params:
-  patience: 50
+  init_mult: 1e-1
+  warmup_steps: 25
+  end_mult: 1e-2

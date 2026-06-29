@@ -90,3 +90,12 @@ class Gemma(NLPProcessor):
         if prompt is None:
             return self.model.encode(x)
         return self.model.encode(x, prompt=prompt)
+
+def get_encoder(encoder_name: str) -> NLPProcessor:
+    match encoder_name:
+        case 'gemma':
+            from nlp import Gemma
+            encoder = Gemma()
+        case _:
+            raise NotImplementedError(f'Unknown encoder {encoder_name}')
+    return encoder

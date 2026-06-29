@@ -60,7 +60,5 @@ def set_gpus(max_gpus=2, max_tasks=0, forcing=False, verbose=False):
 def main():
     get_gpus(max_gpus=4, forcing=True, verbose=True)
 
-    # os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(target_gpu_ids)
-
 if __name__ == "__main__":
     main()

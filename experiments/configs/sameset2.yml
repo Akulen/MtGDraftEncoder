@@ -1,0 +1,65 @@
+name: SameSet2
+train_set:
+  - BLB
+  - FDN
+  - TDM
+  # - MOM
+  # - WOE
+  # - LCI
+  # - MKM
+  # - OTJ
+  # - DSK
+  # - DFT
+  # - TDM
+  # - FIN
+  # - EOE
+temporal_split: true
+time_window: 14
+use_meta: false
+lr: 1e-4
+models:
+  - model: Heuristic
+    use_meta: true
+  - model: Constant
+    model_params:
+      dataset: train
+  - model: Constant
+    model_params:
+      dataset: test
+  - model: DraftTransformer2
+    use_meta: true
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: DraftTransformer2
+    model_params:
+      d_model: 64
+      dropout_p: 0.3
+      n_set_layers: 10
+      n_layers: 5
+  - model: LinearRegression
+    lr: 3e-5
+  - model: LinearRegression
+    use_meta: true
+    lr: 3e-5
+epochs: 100
+test_frequency: 1
+graph_density: 0.01
+batch_size: 256
+loss:
+  - NLL
+  - KL
+optimizer: adamw
+scheduler: warmup_cosine
+scheduler_params:
+  init_mult: 1e-1
+  warmup_steps: 1
+  end_mult: 1e-1
+  n_restarts: 0
+  restart_factor: 1
+seed:
+  - 42
+  - 4242
+  - 424242

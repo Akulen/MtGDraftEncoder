@@ -1,10 +1,9 @@
 import jax
-from jax._src.dtypes import dtype
 import jax.numpy as jnp
 import numpy as np
 import equinox as eqx
 import optax
-from typing import assert_never, Any, Callable, Literal, Optional, Tuple
+from typing import assert_never, Any, Callable, List, Literal, Optional, Tuple
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
 from data_types import Cards, Sets, Drafts
@@ -19,7 +18,8 @@ LossWR = Callable[
     Float[Array, ""]
 ]
 
-PICK_WEIGHT = (jnp.arange(1, 46) / 45) ** 2
+# PICK_WEIGHT = (jnp.arange(1, 46) / 45) ** 2
+PICK_WEIGHT = (jnp.arange(1, 46) / 45)
 
 def MSE_loss(
     y_pred: Float[Array, "bs 45"],
@@ -46,12 +46,11 @@ for i in range(1, 9):
         pascal[i, j] = pascal[i-1, j] + pascal[i-1, j-1]
 pascal = jnp.array(pascal)
 
-def NLL_wr_loss(
-    y_pred: Float[Array, "bs 45"],
+def NLL_wr(
+    y_pred: Float[Array, "bs n_picks"],
     y_true: Int[Array, "bs 2"],
-    mask: Optional[Bool[Array, "bs 45"]]=None,
     eps=1e-4
-) -> Float[Array, ""]:
+) -> Float[Array, "bs n_picks"]:
     W = y_true[:,0,None]
     L = y_true[:,1,None]
     p = jnp.clip(y_pred, eps, 1-eps)
@@ -74,24 +73,52 @@ def NLL_wr_loss(
         #   pascal[2+y_true[:,0], 2].reshape((-1, 1))
         # * (1-y_pred)**3 * y_pred**y_true[:,0].reshape((-1, 1)) # 3 Losses
     )
+    return -biased_log_p
+
+def masked_mean(
+    x: Float[Array, "a b"],
+    mask: Optional[Bool[Array, "a b"]]=None,
+    weight: Optional[Float[Array, "b"]]=None
+) -> Float[Array, ""]:
     if mask is None:
-        mask = jnp.ones_like(y_pred)
-    mask *= PICK_WEIGHT
-    return -(biased_log_p * mask).sum() / mask.sum()
+        mask = jnp.ones_like(x)
+    if weight is not None:
+        mask *= PICK_WEIGHT
+    return (x * mask).sum() / mask.sum()
+
+
+def NLL_wr_loss(
+    y_pred: Float[Array, "bs 45"],
+    y_true: Int[Array, "bs 2"],
+    mask: Optional[Bool[Array, "bs 45"]]=None,
+    eps=1e-4
+) -> Float[Array, ""]:
+    return masked_mean(NLL_wr(y_pred, y_true, eps), mask, PICK_WEIGHT)
+
+def KL_wr_loss(
+    y_pred: Float[Array, "bs 45"],
+    y_true: Int[Array, "bs 2"],
+    mask: Optional[Bool[Array, "bs 45"]]=None,
+    eps=1e-4
+) -> Float[Array, ""]:
+    nll_pred = NLL_wr(y_pred, y_true, eps)
+    nll_true = NLL_wr((y_true[:,0] / y_true.sum(axis=1))[:,None], y_true, eps)
+    return masked_mean(nll_pred - nll_true, mask, PICK_WEIGHT)
 
 LOSSES = {
     'MSE': MSE_loss,
 }
 LOSSES_WR = {
     'MSE': MSE_wr_loss,
-    'NLL': NLL_wr_loss
+    'NLL': NLL_wr_loss,
+    'KL': KL_wr_loss,
 }
 
 class Trainer:
     def __init__(
         self,
         tx: optax.GradientTransformation,
-        loss: Loss | LossWR | Literal['MSE']=MSE_loss,
+        loss: Loss | LossWR | Literal['MSE'] | List[Loss | LossWR | Literal['MSE']]=MSE_loss,
         target: Literal['wr', 'pwr']='wr',
         n_devices: Optional[int]=None
     ):
@@ -104,26 +131,37 @@ class Trainer:
         self.data_sharding = jax.sharding.NamedSharding(
             self.mesh, jax.sharding.PartitionSpec(None, "batch")
         )
-        self.compute_loss_grad = eqx.filter_value_and_grad(
+        self.compute_loss_grad = eqx.filter_grad(
             self.compute_loss, has_aux=True
         )
         self.tx = tx
-        if isinstance(loss, str):
-            L = LOSSES_WR if target == 'wr' else LOSSES
-            if loss in L:
-                loss = L[loss]
+        if not isinstance(loss, list):
+            loss = [loss]
+        self.loss = []
+        def wrapper(f):
+            if target == 'wr':
+                def foo(y, drafts, mask=None):
+                    return f(y, drafts.game_outcome, mask)
+            elif target == 'pwr':
+                assert False # fix compute_loss output
+                def foo(y, drafts, mask=None):
+                    return f(y, drafts.pwr, mask)
             else:
-                raise NotImplementedError(f'Loss {loss} not implemented for target {target}')
-        if target == 'wr':
-            self.loss = lambda y, drafts, mask=None: loss(
-                y, drafts.game_outcome, mask
-            )
-        elif target == 'pwr':
-            self.loss = lambda y, drafts, mask=None: loss(
-                y, drafts.pwr, mask
-            )
-        else:
-            assert_never(target)
+                assert_never(target)
+            return foo
+
+        for l in loss:
+            l_fn = None
+            if isinstance(l, str):
+                L = LOSSES_WR if target == 'wr' else LOSSES
+                if l in L:
+                    l_fn = L[l]
+                else:
+                    raise NotImplementedError(f'Loss {l} not implemented for target {target}')
+            else:
+                l_fn = l
+            assert l_fn is not None
+            self.loss.append(wrapper(l_fn))
 
     def shard_model(self, *data):
         if len(data) == 1:
@@ -144,7 +182,13 @@ class Trainer:
         drafts: Drafts,
         key: PRNGKeyArray,
         inference: bool=False
-    ) -> Tuple[Float[Array, ""], eqx.nn.State]:
+    ) -> Tuple[
+        Float[Array, ""],
+        Tuple[
+            Float[Array, "L"], Float[Array, "bs 45"], Float[Array, "bs 2"],
+            Bool[Array, "bs 45"], eqx.nn.State
+        ]
+    ]:
         batch_size = drafts.picks.shape[0]
         keys = jax.random.split(key, batch_size)
         outputs, state = jax.vmap(
@@ -152,8 +196,16 @@ class Trainer:
             in_axes=(0, None, None, 0, None, None)
         )(keys, cards, sets, drafts, state, inference)
         mask = drafts.picks != 0
-        loss = self.loss(outputs, drafts, mask)
-        return loss, state
+        loss = []
+        for l in self.loss:
+            loss.append(l(outputs, drafts, mask))
+        return loss[0], (
+            jnp.stack(loss),
+            outputs,
+            drafts.game_outcome, # Fix this for pwr
+            mask,
+            state
+        )
 
     @eqx.filter_jit(donate="all")
     def train_step(
@@ -166,11 +218,19 @@ class Trainer:
         sets: Sets,
         drafts: Drafts,
         key: PRNGKeyArray
-    ) -> Tuple[DraftWRPredictor, eqx.nn.State, Any, Float[Array, ""]]:
+    ) -> Tuple[
+        DraftWRPredictor,
+        eqx.nn.State,
+        Any,
+        Float[Array, "L"],
+        Float[Array, "bs 45"],
+        Float[Array, "bs 2"],
+        Bool[Array, "bs 45"]
+    ]:
         model, state, opt_state, cards = self.shard_model(
             model, state, opt_state, cards
         )
-        (loss, state), grads = self.compute_loss_grad(
+        grads, (loss, pred, true, mask, state) = self.compute_loss_grad(
             model, state, cards, sets, drafts, key
         )
 
@@ -183,7 +243,7 @@ class Trainer:
         model, state, opt_state = self.shard_model(
             model, state, opt_state
         )
-        return model, state, opt_state, loss
+        return model, state, opt_state, loss, pred[:0], true[:0], mask[:0]
 
     @eqx.filter_jit(donate="all")
     def eval_step(
@@ -196,11 +256,19 @@ class Trainer:
         sets: Sets,
         drafts: Drafts,
         key: PRNGKeyArray
-    ) -> Tuple[DraftWRPredictor, eqx.nn.State, Any, Float[Array, ""]]:
+    ) -> Tuple[
+        DraftWRPredictor,
+        eqx.nn.State,
+        Any,
+        Float[Array, "L"],
+        Float[Array, "bs 45"],
+        Float[Array, "bs 2"],
+        Bool[Array, "bs 45"]
+    ]:
         model, state, opt_state, cards = self.shard_model(
             model, state, opt_state, cards
         )
-        loss, state = self.compute_loss(
+        _, (loss, pred, true, mask, _) = self.compute_loss(
             model, state, cards, sets, drafts, key, inference=True
         )
-        return model, state, opt_state, loss
+        return model, state, opt_state, loss, pred, true, mask
